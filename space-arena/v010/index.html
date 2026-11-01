@@ -1,0 +1,1327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Space Arena</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#07080c">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<style>
+  html { -webkit-text-size-adjust:100%; text-size-adjust:none; }
+  html, body { margin:0; height:100%; background:#07080c; overflow:hidden; font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd3dc; }
+  canvas#game { display:block; position:absolute; inset:0; touch-action:none; }
+  #bar { position:absolute; left:0; right:0; top:0; display:flex; gap:6px; justify-content:center; padding:8px; pointer-events:none; }
+  #bar button { pointer-events:auto; background:rgba(20,26,38,.85); border:1px solid #2a3449; color:#dfe5f0; padding:8px 14px; font:inherit; font-size:13px; border-radius:6px; cursor:pointer; touch-action:manipulation; }
+  #bar button:active { background:#2b3a56; }
+  #rotate { display:none; position:absolute; inset:0; background:#07080c; z-index:50; align-items:center; justify-content:center; text-align:center; font-size:18px; line-height:1.6; }
+  @media (orientation: portrait) and (pointer: coarse) { #rotate { display:flex; } }
+  #hud { position:absolute; left:12px; top:48px; font-size:13px; pointer-events:none; text-shadow:0 1px 2px #000; line-height:1.5; }
+  #hud .dim { opacity:.55; }
+  #banner { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:40px; font-weight:700; pointer-events:none; text-shadow:0 2px 12px #000; opacity:0; transition:opacity .25s; }
+  #banner.show { opacity:1; }
+
+  /* ---- Tuning panel ---- */
+  #tune { position:absolute; right:0; top:0; bottom:0; width:340px; background:rgba(10,12,18,.94); border-left:1px solid #1e2330; overflow-y:auto; padding:12px 14px 40px; box-sizing:border-box; font-size:12px; display:none; }
+  #tune.open { display:block; }
+  #tune h2 { margin:0 0 8px; font-size:14px; letter-spacing:.08em; color:#8fd3ff; }
+  #tune h3 { margin:14px 0 6px; font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:#7f8798; border-bottom:1px solid #1e2330; padding-bottom:3px; }
+  #tune .row { display:grid; grid-template-columns: 1fr 120px 58px; gap:8px; align-items:center; margin:4px 0; }
+  #tune .row label { color:#b8bfcc; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #tune input[type=range] { width:100%; accent-color:#5ab0ff; }
+  #tune input[type=number] { width:100%; background:#0f1219; border:1px solid #2a3140; color:#e6e9ef; padding:2px 4px; font:inherit; box-sizing:border-box; }
+  #tune .bar { display:flex; gap:6px; flex-wrap:wrap; margin:6px 0; }
+  #tune button, #tune select { background:#182030; border:1px solid #2a3449; color:#dfe5f0; padding:4px 8px; font:inherit; cursor:pointer; border-radius:3px; }
+  #tune button:hover { background:#22304a; }
+  #tune .perf { background:#0b0e14; border:1px solid #1e2330; padding:6px 8px; margin-bottom:6px; line-height:1.4; }
+  #tune .perf canvas { width:100%; height:44px; display:block; margin-top:4px; }
+  #tune .note { color:#6f7787; font-size:11px; margin-top:8px; }
+  #tune kbd { background:#1a2030; border:1px solid #2c3648; border-radius:3px; padding:0 4px; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="bar"><button id="bPossess">Possess</button><button id="bSpectate">Spectate</button><button id="bRestart">Restart</button><button id="bTune">Tuning</button><button id="bInput">Input</button></div>
+<div id="hud"></div>
+<div id="banner"></div>
+<div id="rotate">&#x1F4F1;&#x21BB;<br>rotate your device<br><span style="opacity:.5;font-size:13px">Space Arena plays in landscape</span></div>
+<div id="tune">
+  <h2>TUNING <span style="float:right;color:#5a6274;font-size:11px">T to close</span></h2>
+  <div class="perf" id="perf"></div>
+  <div class="bar">
+    <select id="presetSel"></select>
+    <button id="btnSave">Save as…</button>
+    <button id="btnReset">Reset</button>
+    <button id="btnCopy">Copy JSON</button>
+    <button id="btnRestart">Restart match</button>
+  </div>
+  <div id="tuneRows"></div>
+  <div class="note">
+    <kbd>WASD</kbd> move · mouse aim · <kbd>click</kbd>/<kbd>space</kbd> fire · <kbd>1</kbd> possess/release ship · gamepad: sticks + RT ·
+    <kbd>R</kbd> reload · <kbd>Enter</kbd> restart · <kbd>H</kbd> debug overlay · <kbd>P</kbd> perf · <kbd>T</kbd> panel
+  </div>
+</div>
+
+<script>
+'use strict';
+// =====================================================================
+//  SCAFFOLD: tuning, rng, loop, perf, input, spatial hash
+//  TOY:      space arena — 2 teams of ships, lasers, asteroids, dumb AI
+// =====================================================================
+
+const GAME_ID = 'space-arena';
+const VERSION = 'v010';
+document.title = 'Space Arena ' + VERSION;
+const WORLD = { w: 1600, h: 900 };
+const TAU = Math.PI * 2;
+
+// ---------------------------------------------------------------- RNG
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+let rand = mulberry32(1);
+const rr = (a, b) => a + rand() * (b - a);
+
+// ------------------------------------------------------------- TUNING
+// def(key, default, min, max, step, group). Access as T.key.
+const T = {};
+const META = [];
+function def(key, v, min, max, step, group) { T[key] = v; META.push({ key, def: v, min, max, step, group }); }
+
+def('teams',          4,    2,    4,   1,     'Match');
+def('shipsPerTeam',   2,    1,    8,   1,     'Match');
+def('shipHp',         20,    1,   10,   1,     'Match');
+def('asteroidCount',  12,   0,   40,   1,     'Match');
+def('matchRestartSec',3,    0,   10,   0.5,   'Match');
+def('wrap',           0,    0,   1,    1,     'Match');     // 1 = toroidal arena, 0 = walls
+def('wallBounce',     0.5,  0,   1,    0.05,  'Match');
+
+def('laserClip',      1,    1,   30,   1,     'Ammo');
+def('laserReload',    2.2,  0.2, 5,    0.1,   'Ammo');
+def('weaponClips',    2,    1,   6,    1,     'Ammo');      // clips granted per weapon pickup
+def('statSpeed',      0.15, 0,   0.6,  0.05,  'Progress');  // +thrust/maxSpeed per speed pickup
+def('statProj',       0.18, 0,   0.6,  0.05,  'Progress');  // +laser speed per pickup
+def('statReload',     0.78, 0.3, 1,    0.02,  'Progress');  // reload time x per pickup
+def('statCap',        2.2,  1,   4,    0.1,   'Progress');  // max multiplier for speed/proj
+def('shotgunPellets', 5,    2,   12,   1,     'Weapons');
+def('shotgunSpread',  18,   2,   60,   1,     'Weapons');
+def('rocketSpeed',    300,  60,  800,  10,    'Weapons');
+def('rocketDmg',      6,    1,   20,   1,     'Weapons');
+def('rocketDirect',   5,    0,   20,   1,     'Weapons');  // extra damage on a direct hit
+def('rocketRadius',   120,   20,  300,  5,     'Weapons');
+def('mineArm',        0.8,  0,   3,    0.1,   'Weapons');
+def('mineLaunch',     380,  50,  1000, 10,    'Weapons');  // launch speed (drags to a stop)
+def('mineChase',      520,  50,  1500, 10,    'Weapons');  // acceleration when triggered
+def('mineChaseMax',   460,  50,  1200, 10,    'Weapons');
+def('mineTrigger',    70,   10,  200,  5,     'Weapons');
+def('mineDmg',        7,    1,   20,   1,     'Weapons');
+def('mineRadius',     100,  20,  300,  5,     'Weapons');
+def('homingSpeed',    170,  60,  800,  10,    'Weapons');
+def('homingTurn',     3.5,  0.5, 12,   0.25,  'Weapons');
+def('homingDmg',      4,    1,   20,   1,     'Weapons');
+def('homingRadius',   60,   10,  200,  5,     'Weapons');
+def('beamCharge',     0.6,  0.1, 2,    0.05,  'Weapons');  // ship locks while charging
+def('beamSpeed',      1500, 300, 4000, 50,    'Weapons');
+def('beamDmg',        14,    1,   30,   1,     'Weapons');
+def('weaponDrop',     0.35,  0,   1,    0.05,  'Powerups'); // chance a powerup is a weapon
+def('powerupEvery',   4.5,    1,   30,   0.5,   'Powerups'); // seconds between spawns
+def('powerupMax',     6,    0,   12,   1,     'Powerups');
+def('powerupLife',    18,   3,   60,   1,     'Powerups'); // despawn
+def('shieldHits',     3,    1,   10,   1,     'Powerups');
+def('repairAmt',      10,    1,   20,   1,     'Powerups');
+def('boostSec',       5,    1,   20,   0.5,   'Powerups');
+def('boostMul',       1.7,  1,   3,    0.1,   'Powerups');
+def('aiPickupRange',  420,  0,   900,  10,    'Powerups');
+
+def('volatileFrac',   0.3,  0,   1,    0.05,  'Hazards');  // fraction of asteroids that explode
+def('boomRadius',     130,  30,  400,  10,    'Hazards');
+def('boomDmg',        8,    0,   20,   1,     'Hazards');
+def('boomPush',       420,  0,   1500, 10,    'Hazards');
+def('rockHpPerR',     0.2,  0.02,0.5,  0.01,  'Hazards');  // rock hp = r * this
+def('rockMinR',       14,   6,   40,   1,     'Hazards');  // smaller than this: destroyed instead of split
+
+def('droneCount',     5,    0,   20,   1,     'Drones');
+def('droneHp',        2,    1,   10,   1,     'Drones');
+def('droneSpeed',     0.45, 0.1, 1.5,  0.05,  'Drones');   // x ship speed
+def('droneRange',     220,  0,   800,  10,    'Drones');
+def('droneFire',      1.2,  0.2, 5,    0.1,   'Drones');   // cooldown
+def('droneRespawn',   8,    0,   60,   1,     'Drones');   // 0 = never
+def('droneDrop',      0.5,  0,   1,    0.05,  'Drones');   // powerup drop chance
+def('barrelEvery',    11,   0,   60,   1,     'Hazards');  // seconds between barrels flying in (0 = off)
+def('barrelHp',       3,    1,   10,   1,     'Hazards');
+def('barrelSpeed',    260,  50,  800,  10,    'Hazards');
+def('spikeCount',     3,    0,   12,   1,     'Hazards');  // spikeballs at start
+def('spikeEvery',     14,   0,   60,   1,     'Hazards');  // respawn interval (0 = off)
+def('spikeFuse',      0.4,  0.05,2,    0.05,  'Hazards');  // ignite → explode
+def('spikeRadius',    120,  20,  300,  5,     'Hazards');
+def('spikeDmg',       6,    1,   20,   1,     'Hazards');
+def('aimTurnMul',     1,    0.5, 30,   0.5,   'Ship');      // turn-rate multiplier while aiming (kbm)
+def('stickTurnMul',   6,    1,   30,   0.5,   'Input');     // facing snap for stick controllers (button/twin/fling): turnRate x this
+def('assistCone',     22,   5,   60,   1,     'Input');     // twin mode: target must be within this many degrees of the stick direction
+def('assistSnap',     1,    0,   1,    0.05,  'Input');     // twin mode: 0 = fire along the stick, 1 = fire at the (lead-aimed) target
+def('aimLineLen',     420,  100, 1200, 10,    'Input');     // length of the touch aim line
+
+def('thrust',         170,  50,  1500, 10,    'Ship');
+def('maxSpeed',       160,  50,  1000, 10,    'Ship');
+def('drag',           0.9,  0,   5,    0.05,  'Ship');
+def('turnRate',       4,    0.5, 20,   0.25,  'Ship');
+def('shipRadius',     14,   6,   30,   1,     'Ship');
+
+def('fireCooldown',   0.22, 0.03,1,    0.01,  'Laser');   // laser shot cooldown within a clip
+def('laserSpeed',     260,  100, 2000, 10,    'Laser');
+def('laserLife',      2,  0.2, 4,    0.05,  'Laser');
+def('laserSpread',    8,    0,   15,   0.25,  'Laser');  // degrees
+def('recoil',         40,   0,   400,  5,     'Laser');
+def('laserPush',      0.5,  0,   2,    0.05,  'Laser');    // shove on hit, x projectile velocity
+def('rankCap',        4,    0,   8,    1,     'Laser');   // max gun rank (rank = extra laser shots; earned by kills of equal/higher rank)
+def('maxShots',       5,    1,   9,    1,     'Laser');
+def('multiSpread',    9,    0,   30,   1,     'Laser');   // degrees between fan shots
+def('multiOffset',    6,    0,   20,   1,     'Laser');   // px between parallel shots
+
+def('aiRange',        380,  60,  900,  10,    'AI');
+def('aiOrbit',        320,  40,  600,  10,    'AI');
+def('aiLead',         0.8,  0,   1.5,  0.05,  'AI');
+def('aiAim',          26,   1,   60,   1,     'AI');      // degrees: fire if within
+def('aiThink',        0.3, 0.02,1,    0.01,  'AI');      // seconds between decisions
+def('aiRetreatHp',    8,    0,   5,    1,     'AI');
+def('aiRetreatSec',   2.5,  0,   10,   0.25,  'AI');      // max time spent retreating before re-engaging
+def('aiAvoid',        110,  0,   400,  10,    'AI');
+def('aiWallMargin',   140,  0,   400,  10,    'AI');      // steer away from walls inside this
+def('aiBreakDist',    0.6,  0.2, 1.2,  0.05,  'AI');      // x aiOrbit: closer than this = slugfest, break off
+def('aiBreakSec',     1.4,  0.2, 5,    0.1,   'AI');      // how long a break-off lasts
+def('aiBreakEvery',   3.5,  0.5, 15,   0.5,   'AI');      // min seconds between break-offs
+
+def('astMinR',        22,   8,   80,   1,     'Asteroids');
+def('astMaxR',        58,   8,   120,  1,     'Asteroids');
+def('astSpeed',       45,   0,   300,  5,     'Asteroids');
+def('astBounce',      0.9,  0,   1.5,  0.05,  'Asteroids');
+
+def('particles',      1,    0,   1,    1,     'FX');
+def('laserGlow',      1,    0,   1,    1,     'FX');
+def('moveChevron',    1,    0,   1,    1,     'FX');
+def('screenShake',    14,   0,   40,   1,     'FX');      // on elimination
+def('hitShake',       2.5,  0,   15,   0.5,   'FX');
+def('hitstop',        0.015,0,   0.3,  0.005, 'FX');      // sim freeze on laser hit (s)
+def('elimHitstop',    0.12, 0,   0.5,  0.01,  'FX');
+def('dilateSec',      0.7,  0,   3,    0.05,  'FX');      // slow-mo after elimination (real s)
+def('dilateScale',    0.25, 0.05,1,    0.05,  'FX');      // sim speed during slow-mo
+def('elimZoom',       1.35, 1,   2.5,  0.05,  'FX');      // camera zoom toward elimination
+def('zoomEase',       6,    1,   20,   0.5,   'FX');
+def('sfxVolume',      0.5,  0,   1,    0.05,  'FX');
+
+const PRESETS = {
+  default: {},
+  floaty:  { thrust: 260, drag: 0.25, maxSpeed: 480, turnRate: 4 },
+  arcade:  { thrust: 900, drag: 3.5, maxSpeed: 420, turnRate: 14, fireCooldown: 0.12, laserSpeed: 1000 },
+  sniper:  { fireCooldown: 0.6, laserSpeed: 1400, laserLife: 2, laserSpread: 0, aiRange: 600, aiOrbit: 450, aiAim: 4 },
+};
+function applyTuning(obj) { for (const m of META) if (obj[m.key] !== undefined) T[m.key] = +obj[m.key]; }
+function resetTuning() { for (const m of META) T[m.key] = m.def; }
+function tuningJSON() { const o = {}; for (const m of META) o[m.key] = T[m.key]; return o; }
+const LS_KEY = GAME_ID + '.tuning';
+function loadTuning() {
+  try {
+    const s = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
+    if (s) { applyTuning(s.values || {}); Object.assign(PRESETS, s.presets || {}); }
+  } catch (e) {}
+}
+function saveTuning() {
+  try {
+    const custom = {}; for (const k in PRESETS) if (!['default','floaty','arcade','sniper'].includes(k)) custom[k] = PRESETS[k];
+    localStorage.setItem(LS_KEY, JSON.stringify({ values: tuningJSON(), presets: custom }));
+  } catch (e) {}
+}
+
+// -------------------------------------------------------------- PERF
+const perf = { frame: 0, sim: 0, ai: 0, col: 0, render: 0, hist: new Float32Array(120), hi: 0, fps: 0, _acc: 0, _n: 0 };
+function perfPush(ms) { perf.hist[perf.hi] = ms; perf.hi = (perf.hi + 1) % perf.hist.length; }
+
+// ------------------------------------------------------------ SPATIAL HASH
+class Grid {
+  constructor(cell) { this.cell = cell; this.map = new Map(); }
+  clear() { this.map.clear(); }
+  key(x, y) { return ((x / this.cell) | 0) * 73856093 ^ ((y / this.cell) | 0) * 19349663; }
+  insert(e) {
+    const r = e.r, c = this.cell;
+    const x0 = ((e.x - r) / c) | 0, x1 = ((e.x + r) / c) | 0, y0 = ((e.y - r) / c) | 0, y1 = ((e.y + r) / c) | 0;
+    for (let gx = x0; gx <= x1; gx++) for (let gy = y0; gy <= y1; gy++) {
+      const k = gx * 73856093 ^ gy * 19349663;
+      let b = this.map.get(k); if (!b) this.map.set(k, b = []); b.push(e);
+    }
+  }
+  query(x, y, r, out) {
+    out.length = 0; const c = this.cell;
+    const x0 = ((x - r) / c) | 0, x1 = ((x + r) / c) | 0, y0 = ((y - r) / c) | 0, y1 = ((y + r) / c) | 0;
+    for (let gx = x0; gx <= x1; gx++) for (let gy = y0; gy <= y1; gy++) {
+      const b = this.map.get(gx * 73856093 ^ gy * 19349663); if (!b) continue;
+      for (let i = 0; i < b.length; i++) if (out.indexOf(b[i]) < 0) out.push(b[i]);
+    }
+    return out;
+  }
+}
+
+// ------------------------------------------------------------ ENTITIES
+// Nintendo P1-P4. color = outline/laser, dim = hull fill (primary), accent = tertiary trim. shape = silhouette id.
+const TEAMS = [
+  { name: 'P1', color: '#ff3b3b', dim: '#6e1414', accent: '#ffd36b', shape: 0 },
+  { name: 'P2', color: '#3d8bff', dim: '#12336e', accent: '#9be7ff', shape: 1 },
+  { name: 'P3', color: '#ffd400', dim: '#6b5600', accent: '#fff6b0', shape: 2 },
+  { name: 'P4', color: '#3ddc5a', dim: '#125c25', accent: '#c8ffb0', shape: 3 },
+  { name: 'Drone', color: '#9aa3b5', dim: '#2b3140', accent: '#e4e9f2', shape: 4 },  // neutral fodder, team index DRONE
+];
+const DRONE = 4;
+const POWERUPS = {
+  S: { name: 'shield', color: '#7fe0ff' }, H: { name: 'repair', color: '#7dff9a' }, V: { name: 'speed+', color: '#ffd166' },
+  P: { name: 'proj speed+', color: '#9be7ff' }, C: { name: 'clip+', color: '#ffe08a' }, L: { name: 'reload+', color: '#b0ffb0' }, D: { name: 'damage+', color: '#ff9a7a' },
+  G: { name: 'shotgun', color: '#ffb347', weapon: 'shotgun' }, R: { name: 'rockets', color: '#ff6b6b', weapon: 'rocket' }, M: { name: 'mines', color: '#c3a6ff', weapon: 'mine' },
+  K: { name: 'seekers', color: '#6bffd3', weapon: 'homing' }, B: { name: 'beam', color: '#ffffff', weapon: 'beam' },
+};
+// clip = shots per clip, reload = seconds, cd = seconds between shots. Laser clip/reload are tunable (T.laserClip/T.laserReload).
+const WEAPONS = {
+  laser:   { name: 'LASER',   clip: 6, reload: 1.4, cd: 0.22 },
+  shotgun: { name: 'SHOTGUN', clip: 2, reload: 2.4, cd: 1.0 },
+  rocket:  { name: 'ROCKETS', clip: 2, reload: 3.0, cd: 1.4 },
+  mine:    { name: 'MINES',   clip: 2, reload: 2.6, cd: 1.2 },
+  homing:  { name: 'SEEKERS', clip: 2, reload: 3.0, cd: 1.0 },
+  beam:    { name: 'BEAM',    clip: 1, reload: 3.5, cd: 0.2 },
+};
+function wdef(s) { const w = WEAPONS[s.weapon], st = s.stat || { clip: 0, reload: 1 }; return s.weapon === 'laser' ? { ...w, clip: T.laserClip + st.clip, reload: T.laserReload * st.reload, cd: T.fireCooldown } : { ...w, reload: w.reload * st.reload }; }
+function giveWeapon(s, type) { s.weapon = type; const w = wdef(s); s.ammo = w.clip; s.reserve = type === 'laser' ? Infinity : w.clip * (T.weaponClips - 1); s.reload = 0; s.charge = 0; }
+function startReload(s) { const w = wdef(s); if (s.reload > 0 || s.ammo >= w.clip || s.reserve <= 0) return; s.reload = w.reload; s.reloadMax = w.reload; }
+// spawn anchors (fractions of arena) per team count
+function teamSpawn(team, n) {
+  if (n === 2) return [[0.3, 0.5], [0.7, 0.5]][team];
+  if (n === 3) return [[0.25, 0.3], [0.75, 0.3], [0.5, 0.78]][team];
+  return [[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]][team];
+}
+const S = { ships: [], lasers: [], asteroids: [], parts: [], pups: [], rings: [], nextPup: 0, droneTimer: 0, barrelTimer: 0, t: 0, match: null, shake: 0, hitstop: 0, dilate: 0, zoom: 1, focus: null };
+const grid = new Grid(80);
+const qbuf = [];
+
+// wrap (toroidal) or bounce off walls, per T.wrap. Returns true if a laser should die (hit wall).
+function wrap(e) {
+  if (T.wrap) {
+    if (e.x < 0) e.x += WORLD.w; else if (e.x >= WORLD.w) e.x -= WORLD.w;
+    if (e.y < 0) e.y += WORLD.h; else if (e.y >= WORLD.h) e.y -= WORLD.h;
+    return false;
+  }
+  const r = e.r || 0; let hit = false;
+  if (e.x < r) { e.x = r; e.vx = Math.abs(e.vx) * T.wallBounce; hit = true; } else if (e.x > WORLD.w - r) { e.x = WORLD.w - r; e.vx = -Math.abs(e.vx) * T.wallBounce; hit = true; }
+  if (e.y < r) { e.y = r; e.vy = Math.abs(e.vy) * T.wallBounce; hit = true; } else if (e.y > WORLD.h - r) { e.y = WORLD.h - r; e.vy = -Math.abs(e.vy) * T.wallBounce; hit = true; }
+  return hit;
+}
+// shortest delta (toroidal when wrapping)
+function delta(ax, ay, bx, by) {
+  let dx = bx - ax, dy = by - ay;
+  if (T.wrap) {
+    if (dx > WORLD.w / 2) dx -= WORLD.w; else if (dx < -WORLD.w / 2) dx += WORLD.w;
+    if (dy > WORLD.h / 2) dy -= WORLD.h; else if (dy < -WORLD.h / 2) dy += WORLD.h;
+  }
+  return [dx, dy];
+}
+const angDiff = (a, b) => { let d = (b - a) % TAU; if (d > Math.PI) d -= TAU; if (d < -Math.PI) d += TAU; return d; };
+
+function makeShip(team, i, n) {
+  const [fx, fy] = teamSpawn(team, T.teams) || [0.5, 0.5];
+  const cx = WORLD.w * fx, cy = WORLD.h * fy;
+  const toC = Math.atan2(WORLD.h / 2 - cy, WORLD.w / 2 - cx);          // face arena center
+  const off = (i - (n - 1) / 2) * 50;                                    // spread teammates perpendicular to facing
+  return {
+    kind: 'ship', team, id: team * 10 + i, alive: true,
+    x: cx + Math.cos(toC + Math.PI / 2) * off, y: cy + Math.sin(toC + Math.PI / 2) * off, vx: 0, vy: 0,
+    a: toC, r: T.shipRadius, hp: T.shipHp, cd: 0, hitFlash: 0,
+    ctrl: null, ai: { state: 'HUNT', target: null, think: rr(0, T.aiThink), aimA: 0, retreated: 0, breakT: 0, breakCd: rr(0, T.aiBreakEvery), breakDir: 1 },
+    intent: { mx: 0, my: 0, ax: 0, ay: 0, aim: false, turret: false, fire: false, reload: false },
+    kills: 0, rank: 0, shield: 0, boost: 0, drone: false,
+    weapon: 'laser', ammo: T.laserClip, reserve: Infinity, reload: 0, reloadMax: 1, charge: 0, chargeA: 0,
+    stat: { speed: 1, pspeed: 1, clip: 0, reload: 1, dmg: 0 },
+  };
+}
+function makeDrone() {
+  // spawn on a random edge, drifting in
+  const side = rand() * 4 | 0, m = 30;
+  const x = side === 0 ? m : side === 1 ? WORLD.w - m : rr(m, WORLD.w - m), y = side === 2 ? m : side === 3 ? WORLD.h - m : rr(m, WORLD.h - m);
+  const d = makeShip(DRONE, 0, 1); d.x = x; d.y = y; d.r = T.shipRadius * 0.75; d.hp = T.droneHp; d.drone = true; d.id = 100 + (rand() * 1e6 | 0);
+  d.ai.wander = rr(0, TAU); d.ai.wanderT = 0; d.ammo = Infinity; return d;
+}
+function makePowerup(x, y, type) {
+  if (!type) { const pool = Object.keys(POWERUPS).filter(k => !!POWERUPS[k].weapon === (rand() < T.weaponDrop)); type = pool[rand() * pool.length | 0]; }
+  return { x: x ?? rr(80, WORLD.w - 80), y: y ?? rr(80, WORLD.h - 80), r: 12, type, life: T.powerupLife, born: S.t };
+}
+function makeAsteroid(r0, x0, y0) {
+  const r = r0 || rr(T.astMinR, T.astMaxR), a = rr(0, TAU), sp = rr(0.3, 1) * T.astSpeed;
+  // keep spawn away from ship columns
+  let x = x0, y = y0, tries = 0;
+  if (x0 == null) do { x = rr(0, WORLD.w); y = rr(0, WORLD.h); } while (tries++ < 30 && [...Array(T.teams).keys()].some(t => { const [fx, fy] = teamSpawn(t, T.teams); return Math.hypot(x - WORLD.w * fx, y - WORLD.h * fy) < 160 + r; }));
+  const pts = []; const n = 7 + (rand() * 5 | 0);
+  for (let i = 0; i < n; i++) pts.push(rr(0.7, 1.1));
+  const hp = Math.max(1, Math.round(r * T.rockHpPerR));
+  return { kind: 'ast', x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, r, a: rr(0, TAU), spin: rr(-0.6, 0.6), pts, volatile: rand() < T.volatileFrac, hp, maxHp: hp, seed: rand() * 1000 };
+}
+function spawnParticles(x, y, n, color, speed, life) {
+  if (!T.particles || S.headless) return;
+  for (let i = 0; i < n; i++) {
+    const a = rr(0, TAU), sp = rr(0.2, 1) * speed;
+    S.parts.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life, maxLife: life, color });
+  }
+}
+
+// ---- procedural SFX (WebAudio). Unlocked on first user gesture.
+let AC = null, master = null;
+function audioInit() {
+  if (AC) return; try { AC = new (window.AudioContext || window.webkitAudioContext)(); master = AC.createGain(); master.connect(AC.destination); } catch (e) {}
+}
+let noiseBuf = null;
+function noise() { if (!noiseBuf) { noiseBuf = AC.createBuffer(1, AC.sampleRate * 0.5, AC.sampleRate); const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1; } const n = AC.createBufferSource(); n.buffer = noiseBuf; return n; }
+function env(node, t0, peak, dur, curve = 'exp') { const g = AC.createGain(); g.gain.setValueAtTime(peak, t0); curve === 'exp' ? g.gain.exponentialRampToValueAtTime(0.001, t0 + dur) : g.gain.linearRampToValueAtTime(0, t0 + dur); node.connect(g); g.connect(master); return g; }
+function sfx(name, x) {
+  if (!AC || S.headless || T.sfxVolume <= 0) return;
+  if (AC.state === 'suspended') AC.resume();
+  master.gain.value = T.sfxVolume;
+  const t = AC.currentTime, pan = AC.createStereoPanner ? AC.createStereoPanner() : null;
+  if (pan) { pan.pan.value = Math.max(-1, Math.min(1, (x / WORLD.w - 0.5) * 1.6)); pan.connect(master); }
+  const out = pan || master;
+  const o = AC.createOscillator();
+  switch (name) {
+    case 'fire': { o.type = 'square'; o.frequency.setValueAtTime(760 + Math.random() * 120, t); o.frequency.exponentialRampToValueAtTime(180, t + 0.09);
+      const g = env(o, t, 0.12, 0.1); g.disconnect(); g.connect(out); o.start(t); o.stop(t + 0.1); break; }
+    case 'hit': { const n = noise(); const f = AC.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 1400 + Math.random() * 600; f.Q.value = 1.2; n.connect(f);
+      const g = env(f, t, 0.35, 0.09); g.disconnect(); g.connect(out); n.start(t); n.stop(t + 0.1);
+      o.type = 'triangle'; o.frequency.setValueAtTime(420, t); o.frequency.exponentialRampToValueAtTime(120, t + 0.07); const g2 = env(o, t, 0.15, 0.07); g2.disconnect(); g2.connect(out); o.start(t); o.stop(t + 0.08); break; }
+    case 'elim': { const n = noise(); const f = AC.createBiquadFilter(); f.type = 'lowpass'; f.frequency.setValueAtTime(3200, t); f.frequency.exponentialRampToValueAtTime(90, t + 0.55); n.connect(f);
+      const g = env(f, t, 0.8, 0.6); g.disconnect(); g.connect(out); n.start(t); n.stop(t + 0.6);
+      o.type = 'sine'; o.frequency.setValueAtTime(140, t); o.frequency.exponentialRampToValueAtTime(28, t + 0.5); const g2 = env(o, t, 0.9, 0.5); g2.disconnect(); g2.connect(out); o.start(t); o.stop(t + 0.5); break; }
+    case 'bump': { o.type = 'sine'; o.frequency.setValueAtTime(95, t); o.frequency.exponentialRampToValueAtTime(40, t + 0.08); const g = env(o, t, 0.25, 0.09); g.disconnect(); g.connect(out); o.start(t); o.stop(t + 0.09); break; }
+  }
+}
+function elimination(x, y) {
+  S.shake = T.screenShake; S.hitstop = Math.max(S.hitstop, T.elimHitstop); S.dilate = T.dilateSec; S.focus = { x, y }; sfx('elim', x);
+}
+
+function startMatch(seed) {
+  rand = mulberry32(seed ?? (Math.random() * 1e9 | 0));
+  S.seed = seed;
+  S.ships.length = 0; S.lasers.length = 0; S.asteroids.length = 0; S.parts.length = 0;
+  S.t = 0; S.match = { over: false, winner: -1, duration: 0, restartIn: 0 }; S.hitstop = 0; S.dilate = 0; S.zoom = 1; S.focus = null; S.shake = 0; S.flash = 0;
+  for (let tm = 0; tm < T.teams; tm++) for (let i = 0; i < T.shipsPerTeam; i++) S.ships.push(makeShip(tm, i, T.shipsPerTeam));
+  for (let i = 0; i < T.asteroidCount; i++) S.asteroids.push(makeAsteroid());
+  S.pups.length = 0; S.rings.length = 0; S.nextPup = T.powerupEvery * 0.5; S.droneTimer = 0; S.barrelTimer = T.barrelEvery * 0.6;
+  for (let i = 0; i < T.droneCount; i++) { const d = makeDrone(); d.x = rr(100, WORLD.w - 100); d.y = rr(100, WORLD.h - 100); S.ships.push(d); }
+  for (let i = 0; i < T.spikeCount; i++) S.asteroids.push(makeSpike(rr(200, WORLD.w - 200), rr(150, WORLD.h - 150))); S.spikeTimer = T.spikeEvery;
+  // re-attach human controllers to first ship of each team if they were attached
+  for (const c of controllers) if (c.wantsShip != null) { const s = S.ships.find(s => s.team === c.wantsShip); if (s) s.ctrl = c; }
+  if (!S.headless) hideBanner();
+}
+
+// ----------------------------------------------------------- CONTROLLERS
+// A controller fills ship.intent each tick: mx,my = move vector (world), ax,ay = aim dir, fire.
+const keys = {};
+const mouse = { x: 0, y: 0, down: false };
+const controllers = [];
+
+const kbm = {
+  name: 'keyboard+mouse', wantsShip: null,
+  update(ship) {
+    const it = ship.intent;
+    it.mx = (keys['KeyD'] ? 1 : 0) - (keys['KeyA'] ? 1 : 0);
+    it.my = (keys['KeyS'] ? 1 : 0) - (keys['KeyW'] ? 1 : 0);
+    const [dx, dy] = delta(ship.x, ship.y, mouse.x, mouse.y);
+    it.ax = dx; it.ay = dy; it.aim = true;
+    it.turret = false;
+    if (inputMode === 'fling') { it.fire = kbm.released || !!keys['Space']; kbm.released = false; } else it.fire = mouse.down || !!keys['Space'];
+    it.reload = !!keys['KeyR'];
+  }
+};
+const pad = {
+  name: 'gamepad', wantsShip: null, index: -1,
+  update(ship) {
+    const gp = navigator.getGamepads ? navigator.getGamepads()[this.index] : null;
+    const it = ship.intent; if (!gp) { it.mx = it.my = 0; it.fire = false; it.aim = false; return; }
+    const dz = v => Math.abs(v) < 0.18 ? 0 : v;
+    it.mx = dz(gp.axes[0]); it.my = dz(gp.axes[1]);
+    const ax = dz(gp.axes[2] || 0), ay = dz(gp.axes[3] || 0);
+    const trig = (gp.buttons[7] && gp.buttons[7].value > 0.4) || (gp.buttons[5] && gp.buttons[5].pressed) || (gp.buttons[0] && gp.buttons[0].pressed);
+    const am = Math.hypot(ax, ay);
+    it.aim = am > 0.3; it.ax = ax; it.ay = ay; it.turret = inputMode !== 'button'; it.fire = false;
+    if (inputMode === 'button') { it.aim = false; it.fire = trig; }
+    else if (inputMode === 'twin') { if (it.aim) assistFire(ship, it); }
+    else { if (am > 0.3) this.held = { dx: ax / am, dy: ay / am }; else if (this.held) { it.aim = true; it.ax = this.held.dx; it.ay = this.held.dy; it.fire = true; this.held = null; } if (trig) it.fire = true; }
+  }
+};
+// Touch: two virtual sticks, anchored where the finger lands. Left = move; ship facing ALWAYS follows the left stick.
+// Input modes: button = right side is a fire button, shots go out the nose;
+// twin = right stick is a focus direction; the shot is AI-assisted (fires only when a target is in the cone + LOS + range), no manual override;
+// fling = right stick shows an aim line; releasing fires turret-style in the fling direction.
+// Twin-mode trigger: the same test the AI uses. Picks the best enemy inside the cone with line of sight, in range; aims with lead.
+function assistFire(ship, it) {
+  const am = Math.hypot(it.ax, it.ay) || 1, ux = it.ax / am, uy = it.ay / am, cosC = Math.cos(T.assistCone * Math.PI / 180);
+  let best = null, bs = -Infinity;
+  for (const o of S.ships) if (o.alive && o.team !== ship.team) {
+    const [dx, dy] = delta(ship.x, ship.y, o.x, o.y); const d = Math.hypot(dx, dy) || 1; if (d > T.aiRange * 1.2) continue;
+    const c = (dx * ux + dy * uy) / d; if (c < cosC) continue;
+    const sc = c - d / 3000; if (sc > bs && hasLos(ship, o)) { bs = sc; best = o; }
+  }
+  ship.assistTgt = best; it.fire = false;
+  if (!best) return;
+  const [dx, dy] = delta(ship.x, ship.y, best.x, best.y); const d = Math.hypot(dx, dy) || 1;
+  const tof = d / (T.laserSpeed * ship.stat.pspeed) * T.aiLead; const lx = dx + (best.vx - ship.vx) * tof, ly = dy + (best.vy - ship.vy) * tof; const ll = Math.hypot(lx, ly) || 1;
+  const k = T.assistSnap; it.ax = ux * (1 - k) + lx / ll * k; it.ay = uy * (1 - k) + ly / ll * k; it.fire = true;
+}
+function hasLos(ship, tgt) {
+  const [tx, ty] = delta(ship.x, ship.y, tgt.x, tgt.y); const L2 = tx * tx + ty * ty;
+  for (const a of S.asteroids) {
+    const [ax, ay] = delta(ship.x, ship.y, a.x, a.y); const t = Math.max(0, Math.min(1, (ax * tx + ay * ty) / (L2 || 1)));
+    const ex = ax - tx * t, ey = ay - ty * t; if (ex * ex + ey * ey < a.r * a.r) return false;
+  }
+  return true;
+}
+const INPUT_MODES = ['button', 'twin', 'fling'];
+let inputMode = (() => { try { return localStorage.getItem(GAME_ID + '.input') || 'twin'; } catch (e) { return 'twin'; } })();
+function setInputMode(m) { inputMode = m; try { localStorage.setItem(GAME_ID + '.input', m); } catch (e) {} kbm.instant = m !== 'button'; document.getElementById('bInput').textContent = 'Input: ' + m; }
+const touch = {
+  name: 'touch', wantsShip: null, L: null, R: null, radius: 60, flung: null,
+  update(ship) {
+    const it = ship.intent, L = this.L, R = this.R;
+    it.mx = L ? L.dx : 0; it.my = L ? L.dy : 0; it.reload = false; it.fire = false; it.aim = false; it.turret = inputMode !== 'button'; ship.assistTgt = null;
+    const rm = R ? Math.hypot(R.dx, R.dy) : 0;
+    if (inputMode === 'button') { it.fire = !!R; }
+    else if (inputMode === 'twin') { if (rm > 0.12) { it.aim = true; it.ax = R.dx; it.ay = R.dy; assistFire(ship, it); } }
+    else { if (R && rm > 0.12) { it.aim = true; it.ax = R.dx; it.ay = R.dy; } if (this.flung) { it.aim = true; it.ax = this.flung.dx; it.ay = this.flung.dy; it.fire = true; this.flung = null; } }
+  }
+};
+const IS_TOUCH = matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
+controllers.push(kbm, pad, touch);
+
+// AI: dumb state machine. HUNT -> STRAFE at orbit distance -> RETREAT when low hp.
+function aiUpdate(ship, dt) {
+  const ai = ship.ai, it = ship.intent;
+  ai.think -= dt;
+  if (ai.think <= 0) {
+    ai.think = T.aiThink;
+    // pick nearest living enemy
+    let best = null, bd = Infinity;
+    for (const o of S.ships) if (o.alive && o.team !== ship.team) {
+      const [dx, dy] = delta(ship.x, ship.y, o.x, o.y); let d = dx * dx + dy * dy;
+      if (o.drone) d *= 6; // drones are low priority (weighted far)
+      if (d < bd) { bd = d; best = o; }
+    }
+    ai.target = best;
+    const d = best ? Math.hypot(...delta(ship.x, ship.y, best.x, best.y)) : Infinity;
+    // powerup interest: nearest within range; take it if closer than the fight, or it's repair and we're hurt
+    ai.pup = null;
+    if (T.aiPickupRange > 0) {
+      let pb = null, pd = Infinity;
+      for (const u of S.pups) { const [ux, uy] = delta(ship.x, ship.y, u.x, u.y); const ud = Math.hypot(ux, uy); if (ud < pd) { pd = ud; pb = u; } }
+      if (pb && pd < T.aiPickupRange && (pd < d * 1.1 || d > T.aiOrbit * 0.5 || (pb.type === 'H' && ship.hp <= T.shipHp * 0.5) || (pb.type === 'S' && !ship.shield))) ai.pup = pb;
+    }
+    const wantRetreat = ship.hp <= T.aiRetreatHp && ship.hp < T.shipHp && ai.retreated < T.aiRetreatSec;
+    const m = T.aiWallMargin, cornered = !T.wrap && m > 0 && (ship.x < m || ship.x > WORLD.w - m || ship.y < m || ship.y > WORLD.h - m);
+    // slugfest breaker: too close to target and (weaker, or cornered) -> break off sideways for a bit
+    if (ai.breakT <= 0 && ai.breakCd <= 0 && best && d < T.aiOrbit * T.aiBreakDist && (ship.hp <= best.hp || cornered)) {
+      ai.breakT = T.aiBreakSec; ai.breakCd = T.aiBreakEvery; ai.breakDir = rand() < 0.5 ? -1 : 1;
+    }
+    if (ai.breakT > 0) ai.state = 'BREAK';
+    else if (ai.pup) ai.state = 'PICKUP';
+    else if (wantRetreat) ai.state = 'RETREAT';
+    else if (d < T.aiRange) ai.state = 'STRAFE';
+    else ai.state = 'HUNT';
+    ai.aimA = (rand() - 0.5) * 2 * T.aiAim * 0.5; // per-decision aim wobble (deg)
+    // line of sight: is a rock between us and the target? (segment vs circles)
+    ai.los = !best || hasLos(ship, best);
+  }
+  if (ai.state === 'RETREAT') ai.retreated += dt;
+  ai.breakT -= dt; ai.breakCd -= dt;
+  const tgt = ai.target;
+  it.fire = false; it.aim = false; it.mx = it.my = 0;
+  if (!tgt || !tgt.alive) return;
+  const [dx, dy] = delta(ship.x, ship.y, tgt.x, tgt.y);
+  const d = Math.hypot(dx, dy) || 1, nx = dx / d, ny = dy / d;
+  // lead the target
+  const tof = d / T.laserSpeed * T.aiLead;
+  const [ldx, ldy] = [dx + (tgt.vx - ship.vx) * tof, dy + (tgt.vy - ship.vy) * tof];
+  const wob = ai.aimA * Math.PI / 180, ca = Math.cos(wob), sa = Math.sin(wob);
+  it.ax = ldx * ca - ldy * sa; it.ay = ldx * sa + ldy * ca; it.aim = true;
+  if (ai.state === 'PICKUP' && ai.pup && S.pups.includes(ai.pup)) { const [ux, uy] = delta(ship.x, ship.y, ai.pup.x, ai.pup.y); const ud = Math.hypot(ux, uy) || 1; it.mx = ux / ud; it.my = uy / ud; }
+  else if (ai.state === 'HUNT' || ai.state === 'PICKUP') { it.mx = nx; it.my = ny; }
+  else if (ai.state === 'STRAFE') {
+    const side = (ship.id % 2 ? 1 : -1);
+    const radial = (d - T.aiOrbit) / T.aiOrbit; // + means too far
+    it.mx = -ny * side + nx * radial; it.my = nx * side + ny * radial;
+  } else if (ai.state === 'BREAK') {
+    // sideways burst + pull toward arena center so it leaves corners
+    const [cx, cy] = delta(ship.x, ship.y, WORLD.w / 2, WORLD.h / 2); const cd = Math.hypot(cx, cy) || 1;
+    it.mx = -ny * ai.breakDir - nx * 0.4 + cx / cd * 0.6; it.my = nx * ai.breakDir - ny * 0.4 + cy / cd * 0.6;
+  } else { it.mx = -nx; it.my = -ny; }
+  // wall avoidance (walls mode): push inward when inside margin
+  if (!T.wrap && T.aiWallMargin > 0) {
+    const m = T.aiWallMargin;
+    if (ship.x < m) it.mx += (1 - ship.x / m) * 1.5; else if (ship.x > WORLD.w - m) it.mx -= (1 - (WORLD.w - ship.x) / m) * 1.5;
+    if (ship.y < m) it.my += (1 - ship.y / m) * 1.5; else if (ship.y > WORLD.h - m) it.my -= (1 - (WORLD.h - ship.y) / m) * 1.5;
+  }
+  // asteroid avoidance: steer away from nearest asteroid inside aiAvoid
+  if (T.aiAvoid > 0) {
+    grid.query(ship.x, ship.y, T.aiAvoid, qbuf);
+    for (const o of qbuf) if (o.kind === 'ast') {
+      const [ex, ey] = delta(ship.x, ship.y, o.x, o.y); const ed = Math.hypot(ex, ey) - o.r;
+      if (ed < T.aiAvoid) { const w = 1.5 * (1 - ed / T.aiAvoid); it.mx -= ex / (ed + o.r) * w; it.my -= ey / (ed + o.r) * w; }
+    }
+  }
+  // fire if roughly aligned, in range, and not into a rock. Weapon-specific judgement.
+  const want = Math.atan2(it.ay, it.ax), aligned = Math.abs(angDiff(ship.a, want)) < T.aiAim * Math.PI / 180;
+  const w = ship.weapon;
+  if (ai.los && d < T.aiRange * 1.2) {
+    if (w === 'mine') it.fire = d < T.aiOrbit * 0.8;                                  // drop when they're close
+    else if (w === 'beam') it.fire = aligned && Math.abs(angDiff(ship.a, want)) < T.aiAim * 0.4 * Math.PI / 180 && d > T.aiOrbit * 0.7; // only commit to the lock when well lined up
+    else if (w === 'shotgun') it.fire = aligned && d < T.aiOrbit * 0.9;
+    else it.fire = aligned;
+  }
+  it.reload = !it.fire && ship.ammo < wdef(ship).clip * 0.5;
+}
+
+// Drone: wander, plink at the nearest non-drone ship in range. Fodder that gets in the way.
+function droneUpdate(d, dt) {
+  const ai = d.ai, it = d.intent;
+  ai.wanderT -= dt; if (ai.wanderT <= 0) { ai.wanderT = rr(0.8, 2.2); ai.wander += rr(-1.2, 1.2); }
+  it.mx = Math.cos(ai.wander); it.my = Math.sin(ai.wander); it.fire = false; it.aim = false;
+  // wall + asteroid nudge
+  const m = 90; if (d.x < m) it.mx += 1; if (d.x > WORLD.w - m) it.mx -= 1; if (d.y < m) it.my += 1; if (d.y > WORLD.h - m) it.my -= 1;
+  ai.think -= dt;
+  if (ai.think <= 0) {
+    ai.think = 0.25; ai.target = null; let bd = T.droneRange * T.droneRange;
+    for (const o of S.ships) if (o.alive && !o.drone) { const [dx, dy] = delta(d.x, d.y, o.x, o.y); const q = dx * dx + dy * dy; if (q < bd) { bd = q; ai.target = o; } }
+    ai.aimA = rr(-15, 15);
+  }
+  const tg = ai.target;
+  if (tg && tg.alive) {
+    const [dx, dy] = delta(d.x, d.y, tg.x, tg.y); const w = ai.aimA * Math.PI / 180, ca = Math.cos(w), sa = Math.sin(w);
+    it.ax = dx * ca - dy * sa; it.ay = dx * sa + dy * ca; it.aim = true;
+    if (Math.abs(angDiff(d.a, Math.atan2(it.ay, it.ax))) < 0.3) it.fire = true;
+  }
+}
+// Volatile asteroid explosion: AoE damage + push, chains to other volatiles in radius.
+// Unified explosion: AoE damage + impulse on ships, rocks and shootable projectiles. owner gets kill credit.
+function explodeAt(x, y, R, dmg, push, owner, color = '#ff8c42') {
+  const k = R / T.boomRadius;
+  if (!S.headless) S.rings.push({ x, y, R, life: 0.45, max: 0.45, color });
+  spawnParticles(x, y, Math.round(50 * k), color, 380 * Math.sqrt(k), 0.8); spawnParticles(x, y, Math.round(20 * k), '#fff2c0', 520 * Math.sqrt(k), 0.35);
+  S.shake = Math.max(S.shake, T.screenShake * 0.8 * Math.min(1, k)); S.hitstop = Math.max(S.hitstop, T.elimHitstop * 0.6 * Math.min(1, k)); sfx('elim', x);
+  for (const o of S.ships) {
+    if (!o.alive) continue; const [dx, dy] = delta(x, y, o.x, o.y); const d = Math.hypot(dx, dy); if (d > R + o.r) continue;
+    const f = 1 - Math.max(0, d - o.r) / R;
+    o.vx += dx / (d || 1) * push * f; o.vy += dy / (d || 1) * push * f;
+    damage(o, Math.round(dmg * f), owner, x, y);
+  }
+  for (const o of S.asteroids.slice()) {
+    const [dx, dy] = delta(x, y, o.x, o.y); const d = Math.hypot(dx, dy); if (d > R + o.r) continue;
+    const f = 1 - Math.max(0, d - o.r) / R, m = o.spike ? 1.6 : Math.max(0.15, 1 - o.r / 80);
+    o.vx += dx / (d || 1) * push * f * m * 0.5; o.vy += dy / (d || 1) * push * f * m * 0.5;
+    if (o.spike) igniteSpike(o); else if (o.volatile && !o.barrel) o.fuse = Math.min(o.fuse ?? 99, 0.12 + rand() * 0.1); else rockDamage(o, Math.round(dmg * f), x, y);
+  }
+  for (const q of S.lasers) if (q.hp > 0 && q.fuse == null) { const [dx, dy] = delta(x, y, q.x, q.y); if (Math.hypot(dx, dy) < R) q.fuse = 0.04 + rand() * 0.06; }
+}
+function explode(a) {
+  if (a.spike) return explodeSpike(a);
+  const idx = S.asteroids.indexOf(a); if (idx < 0) return; S.asteroids.splice(idx, 1);
+  explodeAt(a.x, a.y, T.boomRadius, T.boomDmg, T.boomPush, null);
+}
+// Rocks crack, then split into 2-3 smaller rocks, or vanish when too small.
+function makeBarrel() {
+  const side = rand() * 4 | 0, r = 16, m = r + 2;
+  const x = side === 0 ? m : side === 1 ? WORLD.w - m : rr(120, WORLD.w - 120), y = side === 2 ? m : side === 3 ? WORLD.h - m : rr(120, WORLD.h - 120);
+  const ang = Math.atan2(WORLD.h * rr(0.3, 0.7) - y, WORLD.w * rr(0.3, 0.7) - x), sp = T.barrelSpeed;
+  return { kind: 'ast', barrel: true, x, y, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp, r, a: rr(0, TAU), spin: rr(-3, 3), pts: [], volatile: true, hp: T.barrelHp, maxHp: T.barrelHp, seed: rand() * 1000, flash: 0 };
+}
+function makeSpike(x, y) {
+  const a = rr(0, TAU), sp = rr(20, 60);
+  if (x == null) { const side = rand() * 4 | 0, m = 20; x = side === 0 ? m : side === 1 ? WORLD.w - m : rr(100, WORLD.w - 100); y = side === 2 ? m : side === 3 ? WORLD.h - m : rr(100, WORLD.h - 100); }
+  return { kind: 'ast', spike: true, x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, r: 13, a: rr(0, TAU), spin: rr(-1.5, 1.5), pts: [], volatile: true, hp: 1, maxHp: 1, seed: rand() * 1000 };
+}
+function igniteSpike(a) { if (a.fuse == null) { a.fuse = T.spikeFuse; sfx('fire', a.x); } }
+function explodeSpike(a) {
+  const idx = S.asteroids.indexOf(a); if (idx < 0) return; S.asteroids.splice(idx, 1);
+  explodeAt(a.x, a.y, T.spikeRadius, T.spikeDmg, T.boomPush, null, '#ff5050');
+}
+function rockDamage(a, n, hx, hy) {
+  if (n <= 0) return;
+  if (a.spike) { igniteSpike(a); return; } a.hp -= n; spawnParticles(hx ?? a.x, hy ?? a.y, 4, a.barrel ? '#ffb060' : '#aab', 110, 0.35);
+  if (a.barrel) { a.flash = 0.15; sfx('bump', a.x); if (a.hp <= 0) { const px = a.x, py = a.y; explode(a); S.pups.push(makePowerup(px, py)); } return; }
+  if (a.hp > 0) return;
+  const idx = S.asteroids.indexOf(a); if (idx < 0) return; S.asteroids.splice(idx, 1);
+  sfx('bump', a.x); spawnParticles(a.x, a.y, 10 + a.r / 3 | 0, '#9aa3b5', 160, 0.6);
+  const cr = a.r * 0.58;
+  if (cr < T.rockMinR) return;
+  const n2 = a.r > 45 ? 3 : 2, base = rr(0, TAU);
+  for (let i = 0; i < n2; i++) {
+    const an = base + i / n2 * TAU, c = makeAsteroid(cr * rr(0.85, 1.1), a.x + Math.cos(an) * cr, a.y + Math.sin(an) * cr);
+    c.vx = a.vx + Math.cos(an) * 70; c.vy = a.vy + Math.sin(an) * 70; c.volatile = false; S.asteroids.push(c);
+  }
+}
+// Apply damage to a ship (shield first). killer = ship or null. Returns true if eliminated.
+function damage(o, n, killer, hx, hy) {
+  if (n <= 0 || !o.alive) return false;
+  if (o.shield > 0) { o.shield = Math.max(0, o.shield - n); o.hitFlash = 0.08; spawnParticles(hx, hy, 8, POWERUPS.S.color, 200, 0.3); sfx('bump', hx); return false; }
+  o.hp -= n; o.hitFlash = 0.12;
+  S.shake = Math.max(S.shake, T.hitShake); S.hitstop = Math.max(S.hitstop, T.hitstop); sfx('hit', hx);
+  if (o.hp > 0) return false;
+  o.alive = false;
+  spawnParticles(o.x, o.y, o.drone ? 18 : 40, TEAMS[o.team].color, 260, 0.9); spawnParticles(o.x, o.y, 12, '#fff', 400, 0.4);
+  if (o.drone) { if (rand() < T.droneDrop) S.pups.push(makePowerup(o.x, o.y)); S.shake = Math.max(S.shake, T.hitShake * 2); sfx('elim', o.x); }
+  else { if (killer && killer.alive) { killer.kills++; if (o.rank >= killer.rank && killer.rank < T.rankCap) { killer.rank++; killer.rankFlash = 1.2; } } elimination(o.x, o.y); }
+  return true;
+}
+
+// Spawn projectiles for a weapon. All projectiles live in S.lasers (historical name).
+function proj(s, type, a, speed, extra) {
+  return Object.assign({ kind: 'proj', type, x: s.x + Math.cos(s.a) * s.r, y: s.y + Math.sin(s.a) * s.r, vx: Math.cos(a) * speed + s.vx * 0.3, vy: Math.sin(a) * speed + s.vy * 0.3,
+    life: 2, team: s.team, owner: s, dmg: 1, r: 0, hp: 0 }, extra);
+}
+function fireWeapon(s, type, dt) {
+  const d2r = Math.PI / 180, keepA = s.a; if (s.fireA != null) s.a = s.fireA; // turret-style: spawn + recoil along the fire angle
+  fireWeaponAt(s, type, dt, d2r); s.a = keepA;
+}
+function fireWeaponAt(s, type, dt, d2r) {
+  if (type === 'laser') {
+    // kill-reward pattern: odd n = center + fan pairs; even n = parallel pair + fan pairs
+    const n = s.drone ? 1 : Math.min(T.maxShots, 1 + s.rank);
+    const px = -Math.sin(s.a), py = Math.cos(s.a); const shots = [];
+    if (n % 2) { shots.push([0, 0]); for (let k = 1; k <= (n - 1) / 2; k++) shots.push([k * T.multiSpread, 0], [-k * T.multiSpread, 0]); }
+    else { shots.push([0, T.multiOffset], [0, -T.multiOffset]); for (let k = 1; k <= (n - 2) / 2; k++) shots.push([k * T.multiSpread, 0], [-k * T.multiSpread, 0]); }
+    for (const [ad, lat] of shots) { const q = proj(s, 'laser', s.a + (ad + (rand() - 0.5) * T.laserSpread) * d2r, T.laserSpeed * s.stat.pspeed, { life: T.laserLife, dmg: 1 + s.stat.dmg }); q.x += px * lat; q.y += py * lat; S.lasers.push(q); }
+    sfx('fire', s.x);
+  } else if (type === 'shotgun') {
+    for (let i = 0; i < T.shotgunPellets; i++) S.lasers.push(proj(s, 'pellet', s.a + (rand() - 0.5) * T.shotgunSpread * d2r, T.laserSpeed * s.stat.pspeed * rr(0.9, 1.2), { life: 0.42, dmg: 1 + s.stat.dmg }));
+    s.vx -= Math.cos(s.a) * 90; s.vy -= Math.sin(s.a) * 90; sfx('hit', s.x); sfx('fire', s.x);
+  } else if (type === 'rocket') {
+    S.lasers.push(proj(s, 'rocket', s.a, T.rocketSpeed * 0.5, { life: 3.5, r: 6, hp: 1, boom: T.rocketRadius, dmg: T.rocketDmg, push: T.boomPush * 0.8 })); sfx('bump', s.x);
+  } else if (type === 'mine') {
+    S.lasers.push(proj(s, 'mine', s.a, T.mineLaunch, { life: 25, r: 7, hp: 1, boom: T.mineRadius, dmg: T.mineDmg, push: T.boomPush, arm: T.mineArm, chase: null })); sfx('bump', s.x);
+  } else if (type === 'homing') {
+    // pick the enemy ship nearest to the aim line
+    let best = null, bs = -Infinity; const fx = Math.cos(s.a), fy = Math.sin(s.a);
+    for (const o of S.ships) if (o.alive && o.team !== s.team) { const [dx, dy] = delta(s.x, s.y, o.x, o.y); const d = Math.hypot(dx, dy) || 1; const sc = (dx * fx + dy * fy) / d - d / 2000; if (sc > bs) { bs = sc; best = o; } }
+    S.lasers.push(proj(s, 'homing', s.a + (rand() - 0.5) * 0.4, T.homingSpeed * 0.6, { life: 4.5, r: 5, hp: 1, boom: T.homingRadius, dmg: T.homingDmg, push: T.boomPush * 0.5, target: best })); sfx('fire', s.x);
+  } else if (type === 'beam') {
+    S.lasers.push(proj(s, 'beam', s.a, T.beamSpeed, { life: 1.2, dmg: T.beamDmg, hitList: [] }));
+    s.vx -= Math.cos(s.a) * 160; s.vy -= Math.sin(s.a) * 160; sfx('elim', s.x); S.shake = Math.max(S.shake, T.hitShake * 3); S.flash = 0.25;
+  }
+  if (type !== 'beam') { s.vx -= Math.cos(s.a) * T.recoil * dt * 10; s.vy -= Math.sin(s.a) * T.recoil * dt * 10; }
+}
+// Destroy a projectile in flight (shot down / caught in a blast). Explosives still go off, at reduced yield.
+function killProj(q) { q.dead = true; if (q.boom) explodeAt(q.x, q.y, q.boom * 0.6, Math.ceil(q.dmg * 0.6), q.push * 0.6, q.owner, '#ffb080'); else spawnParticles(q.x, q.y, 5, '#fff', 120, 0.3); }
+
+// ------------------------------------------------------------- SIM STEP
+const DT = 1 / 120;
+function step(dt) {
+  S.t += dt;
+  const t0 = performance.now();
+  // grid: ships + asteroids
+  grid.clear();
+  for (const a of S.asteroids) grid.insert(a);
+  for (const s of S.ships) if (s.alive) grid.insert(s);
+  for (const q of S.lasers) if (q.hp > 0) grid.insert(q);
+
+  // --- controllers / AI
+  const tAi = performance.now();
+  for (const s of S.ships) {
+    if (!s.alive) continue;
+    if (s.ctrl) s.ctrl.update(s); else if (s.drone) droneUpdate(s, dt); else aiUpdate(s, dt);
+  }
+  perf.ai += performance.now() - tAi;
+
+  // --- ships physics
+  for (const s of S.ships) {
+    if (!s.alive) continue;
+    const it = s.intent;
+    let ml = Math.hypot(it.mx, it.my); if (ml > 1) { it.mx /= ml; it.my /= ml; ml = 1; }
+    s.boost -= dt; const mul = (s.drone ? T.droneSpeed : 1) * (s.boost > 0 ? T.boostMul : 1) * s.stat.speed;
+    s.vx += it.mx * T.thrust * mul * dt; s.vy += it.my * T.thrust * mul * dt;
+    const k = Math.exp(-T.drag * dt); s.vx *= k; s.vy *= k;
+    const vmax = T.maxSpeed * mul, sp = Math.hypot(s.vx, s.vy); if (sp > vmax) { s.vx *= vmax / sp; s.vy *= vmax / sp; }
+    // facing: aim dir if aiming, else move dir
+    let want = null;
+    const aimFace = it.aim && !it.turret && (it.ax || it.ay);
+    if (aimFace) want = Math.atan2(it.ay, it.ax); else if (ml > 0.1) want = Math.atan2(it.my, it.mx);
+    if (want != null) { const d = angDiff(s.a, want), instant = aimFace && s.ctrl && s.ctrl.instant, mx = T.turnRate * (aimFace ? T.aimTurnMul : s.ctrl && s.ctrl !== kbm ? T.stickTurnMul : 1) * dt; s.a += instant || Math.abs(d) < mx ? d : Math.sign(d) * mx; }
+    s.fireA = it.turret && it.aim && (it.ax || it.ay) ? Math.atan2(it.ay, it.ax) : s.a; // turret modes shoot along the aim, not the nose
+    s.x += s.vx * dt; s.y += s.vy * dt; wrap(s);
+    if (!s.drone) s.r = T.shipRadius;
+    s.cd -= dt; s.hitFlash -= dt; if (s.rankFlash > 0) s.rankFlash -= dt;
+    if (s.drone) { if (it.fire && s.cd <= 0) { s.cd = T.droneFire; fireWeapon(s, 'laser', dt); } }
+    else if (s.charge > 0) {                       // beam charging: locked in place and angle
+      s.charge -= dt; s.vx = s.vy = 0; s.a = s.chargeA;
+      if (s.charge <= 0) fireWeapon(s, 'beam', dt);
+    }
+    else if (s.reload > 0) {
+      s.reload -= dt;
+      if (s.reload <= 0) { const w = wdef(s); const take = Math.min(w.clip, s.reserve); s.ammo = take; s.reserve -= take; if (s.ammo <= 0) giveWeapon(s, 'laser'); }
+    }
+    else if (s.ammo <= 0) { if (s.reserve <= 0) giveWeapon(s, 'laser'); startReload(s); }
+    else if (it.reload) startReload(s);
+    else if (it.fire && s.cd <= 0) {
+      const w = wdef(s); s.cd = w.cd; s.ammo--;
+      if (s.weapon === 'beam') { s.charge = T.beamCharge; s.chargeA = s.fireA; sfx('bump', s.x); }
+      else fireWeapon(s, s.weapon, dt);
+    }
+  }
+  // --- asteroids
+  for (const a of S.asteroids) { a.x += a.vx * dt; a.y += a.vy * dt; a.a += a.spin * dt; wrap(a); if (a.barrel) { const k = Math.exp(-0.5 * dt); a.vx *= k; a.vy *= k; a.flash -= dt; } }
+  if (T.barrelEvery > 0 && !S.match.over) { S.barrelTimer -= dt; if (S.barrelTimer <= 0) { S.barrelTimer = T.barrelEvery; S.asteroids.push(makeBarrel()); } }
+  if (T.spikeEvery > 0 && !S.match.over) { S.spikeTimer -= dt; if (S.spikeTimer <= 0) { S.spikeTimer = T.spikeEvery; if (S.asteroids.filter(a => a.spike).length < T.spikeCount) S.asteroids.push(makeSpike()); } }
+  for (let i = S.rings.length - 1; i >= 0; i--) { S.rings[i].life -= dt; if (S.rings[i].life <= 0) { S.rings[i] = S.rings[S.rings.length - 1]; S.rings.pop(); } }
+  for (const a of S.asteroids.slice()) if (a.fuse != null) { a.fuse -= dt; if (a.fuse <= 0) explode(a); }
+  // powerups: spawn / expire / pickup
+  S.nextPup -= dt;
+  if (S.nextPup <= 0) { S.nextPup = T.powerupEvery; if (S.pups.length < T.powerupMax) S.pups.push(makePowerup()); }
+  for (let i = S.pups.length - 1; i >= 0; i--) {
+    const u = S.pups[i]; u.life -= dt; let taken = u.life <= 0;
+    if (!taken) for (const s of S.ships) {
+      if (!s.alive || s.drone) continue; const [dx, dy] = delta(u.x, u.y, s.x, s.y);
+      if (dx * dx + dy * dy < (u.r + s.r) * (u.r + s.r)) {
+        if (u.type === 'S') s.shield = T.shieldHits; else if (u.type === 'H') s.hp = Math.min(T.shipHp, s.hp + T.repairAmt);
+        else if (u.type === 'V') s.stat.speed = Math.min(T.statCap, s.stat.speed + T.statSpeed); 
+        else if (u.type === 'P') s.stat.pspeed = Math.min(T.statCap, s.stat.pspeed + T.statProj); else if (u.type === 'C') { s.stat.clip++; if (s.weapon === 'laser') s.ammo++; }
+        else if (u.type === 'L') s.stat.reload = Math.max(0.25, s.stat.reload * T.statReload); else if (u.type === 'D') s.stat.dmg++;
+        else if (POWERUPS[u.type].weapon) giveWeapon(s, POWERUPS[u.type].weapon);
+        spawnParticles(u.x, u.y, 14, POWERUPS[u.type].color, 180, 0.5); sfx('fire', u.x); taken = true; break;
+      }
+    }
+    if (taken) { S.pups[i] = S.pups[S.pups.length - 1]; S.pups.pop(); }
+  }
+  // drones: respawn to keep the field populated
+  if (T.droneRespawn > 0 && !S.match.over) {
+    S.droneTimer -= dt;
+    if (S.droneTimer <= 0) { S.droneTimer = T.droneRespawn; if (S.ships.filter(s => s.drone && s.alive).length < T.droneCount) S.ships.push(makeDrone()); }
+  }
+
+  // --- collisions
+  const tCol = performance.now();
+  // asteroid-asteroid & asteroid-ship (elastic-ish push)
+  for (let i = 0; i < S.asteroids.length; i++) {
+    const a = S.asteroids[i];
+    grid.query(a.x, a.y, a.r, qbuf);
+    for (const o of qbuf) {
+      if (o === a || (o.kind === 'ast' && S.asteroids.indexOf(o) < i)) continue;
+      if (o.kind === 'proj' || (o.kind === 'ship' && !o.alive)) continue;
+      const [dx, dy] = delta(a.x, a.y, o.x, o.y); const d = Math.hypot(dx, dy), min = a.r + o.r;
+      if (d >= min || d === 0) continue;
+      const nx = dx / d, ny = dy / d, pen = min - d;
+      const ma = a.r * a.r, mo = o.kind === 'ast' ? o.r * o.r : o.r * o.r * 0.6, tot = ma + mo;
+      a.x -= nx * pen * (mo / tot); a.y -= ny * pen * (mo / tot); o.x += nx * pen * (ma / tot); o.y += ny * pen * (ma / tot);
+      const rvx = o.vx - a.vx, rvy = o.vy - a.vy, vn = rvx * nx + rvy * ny;
+      if (vn < 0) {
+        const j = -(1 + T.astBounce) * vn / (1 / ma + 1 / mo);
+        a.vx -= j * nx / ma; a.vy -= j * ny / ma; o.vx += j * nx / mo; o.vy += j * ny / mo;
+        if (o.kind === 'ship' && -vn > 120) { spawnParticles(o.x, o.y, 4, '#aab', 80, 0.3); sfx('bump', o.x); }
+        if (o.kind === 'ship' && a.spike) igniteSpike(a);
+      }
+    }
+  }
+  // projectiles
+  for (let i = S.lasers.length - 1; i >= 0; i--) {
+    const l = S.lasers[i];
+    if (l.fuse != null) { l.fuse -= dt; if (l.fuse <= 0 && !l.dead) killProj(l); }
+    if (!l.dead) {
+      if (l.type === 'rocket') { const sp = Math.hypot(l.vx, l.vy) || 1; const ns = Math.min(T.rocketSpeed, sp + T.rocketSpeed * 1.6 * dt); l.vx *= ns / sp; l.vy *= ns / sp; }
+      else if (l.type === 'mine') {
+        if (l.chase && l.chase.alive) { // triggered: home in and accelerate
+          const [dx, dy] = delta(l.x, l.y, l.chase.x, l.chase.y); const d = Math.hypot(dx, dy) || 1;
+          l.vx += dx / d * T.mineChase * dt; l.vy += dy / d * T.mineChase * dt; const sp = Math.hypot(l.vx, l.vy); if (sp > T.mineChaseMax) { l.vx *= T.mineChaseMax / sp; l.vy *= T.mineChaseMax / sp; }
+          if (!S.headless && rand() < 0.6) S.parts.push({ x: l.x, y: l.y, vx: 0, vy: 0, life: 0.3, maxLife: 0.3, color: '#ff6060' });
+        } else { l.chase = null; const k = Math.exp(-2.2 * dt); l.vx *= k; l.vy *= k; l.arm -= dt; }
+      }
+      if (l.type === 'rocket' && !S.headless) { const sp = Math.hypot(l.vx, l.vy) || 1; S.parts.push({ x: l.x - l.vx / sp * 8, y: l.y - l.vy / sp * 8, vx: -l.vx * 0.15 + rr(-20, 20), vy: -l.vy * 0.15 + rr(-20, 20), life: 0.45, maxLife: 0.45, color: rand() < 0.5 ? '#ffb060' : '#888' }); }
+      else if (l.type === 'homing') {
+        if (l.target && !l.target.alive) l.target = null;
+        const sp = Math.hypot(l.vx, l.vy) || 1; let ang = Math.atan2(l.vy, l.vx);
+        if (l.target) { const [dx, dy] = delta(l.x, l.y, l.target.x, l.target.y); const d = angDiff(ang, Math.atan2(dy, dx)), mx = T.homingTurn * dt; ang += Math.abs(d) < mx ? d : Math.sign(d) * mx; }
+        const ns = Math.min(T.homingSpeed, sp + T.homingSpeed * 1.5 * dt); l.vx = Math.cos(ang) * ns; l.vy = Math.sin(ang) * ns;
+        if (!S.headless && rand() < 0.5) S.parts.push({ x: l.x, y: l.y, vx: 0, vy: 0, life: 0.25, maxLife: 0.25, color: TEAMS[l.team].color });
+      }
+      l.x += l.vx * dt; l.y += l.vy * dt; l.life -= dt;
+      const wallHit = wrap(l);
+      if (wallHit && l.type !== 'mine') { if (l.boom) killProj(l); else l.dead = true; }
+      if (l.life <= 0) { if (l.boom) killProj(l); else l.dead = true; }
+    }
+    if (!l.dead) {
+      // armed mine: proximity trigger on enemy ships
+      if (l.type === 'mine' && l.arm <= 0 && !l.chase) {
+        for (const o of S.ships) if (o.alive && o.team !== l.team) { const [dx, dy] = delta(l.x, l.y, o.x, o.y); if (dx * dx + dy * dy < T.mineTrigger * T.mineTrigger) { l.chase = o; l.life = Math.min(l.life, 4); sfx('fire', l.x); break; } }
+      }
+    }
+    if (!l.dead) {
+      grid.query(l.x, l.y, 4 + l.r, qbuf);
+      for (const o of qbuf) {
+        if (o === l) continue;
+        if (o.kind === 'ship' && (!o.alive || o.team === l.team)) continue;
+        if (o.kind === 'proj' && (o.team === l.team || o.dead || l.boom || l.type === 'mine' || o.hp <= 0)) continue; // only lasers/pellets/beams shoot things down
+        if (o.kind === 'ship' && l.type === 'mine' && l.arm > 0 && !l.chase) continue;
+        if (o.kind === 'ast' && l.type === 'mine') continue;
+        if (l.hitList && l.hitList.includes(o)) continue;
+        const [dx, dy] = delta(l.x, l.y, o.x, o.y); const rr2 = (o.r + l.r) * (o.r + l.r);
+        if (dx * dx + dy * dy >= rr2) continue;
+        if (l.boom) {
+          l.dead = true;
+          if (o.kind === 'ship' && l.type === 'rocket' && T.rocketDirect > 0) { spawnParticles(l.x, l.y, 10, '#fff', 300, 0.3); damage(o, T.rocketDirect, l.owner, l.x, l.y); }
+          explodeAt(l.x, l.y, l.boom, l.dmg, l.push, l.owner, l.type === 'mine' ? '#d0b0ff' : '#ff8c42'); break;
+        }
+        if (o.kind === 'ship') {
+          const shove = (l.type === 'laser' || l.type === 'pellet') ? T.laserPush : 0.08; o.vx += l.vx * shove; o.vy += l.vy * shove; spawnParticles(l.x, l.y, 6, TEAMS[l.team].color, 160, 0.35);
+          damage(o, l.dmg, l.owner, l.x, l.y);
+          if (l.type === 'beam') { l.hitList.push(o); continue; }   // beam pierces ships
+        } else if (o.kind === 'proj') { o.hp -= l.dmg; if (o.hp <= 0) killProj(o); }
+        else if (o.spike) { o.vx += l.vx * 0.5; o.vy += l.vy * 0.5; igniteSpike(o); }
+        else if (o.volatile && !o.barrel) explode(o);
+        else { if (o.barrel) { o.vx += l.vx * 0.25; o.vy += l.vy * 0.25; } rockDamage(o, l.type === 'beam' ? Math.ceil(l.dmg * 0.75) : l.dmg, l.x, l.y); }
+        l.dead = true; break;
+      }
+    }
+    if (l.dead) { S.lasers[i] = S.lasers[S.lasers.length - 1]; S.lasers.pop(); }
+  }
+  perf.col += performance.now() - tCol;
+
+  // particles
+  for (let i = S.parts.length - 1; i >= 0; i--) {
+    const p = S.parts[i]; p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.96; p.vy *= 0.96;
+    if (p.life <= 0) { S.parts[i] = S.parts[S.parts.length - 1]; S.parts.pop(); }
+  }
+  S.shake *= Math.exp(-8 * dt);
+
+  // --- match state
+  const m = S.match;
+  if (!m.over) {
+    const alive = new Array(T.teams).fill(0); for (const s of S.ships) if (s.alive && !s.drone) alive[s.team]++;
+    const standing = alive.map((n, i) => n ? i : -1).filter(i => i >= 0);
+    if (standing.length <= 1) {
+      m.over = true; m.duration = S.t; m.winner = standing.length ? standing[0] : -1; m.restartIn = T.matchRestartSec;
+      if (!S.headless) showBanner(m.winner < 0 ? 'DRAW' : TEAMS[m.winner].name.toUpperCase() + ' WINS  ·  ' + m.duration.toFixed(1) + 's', m.winner < 0 ? '#ccc' : TEAMS[m.winner].color);
+    }
+  } else if (!S.headless) {
+    m.restartIn -= dt; if (m.restartIn <= 0) startMatch();
+  }
+  perf.sim += performance.now() - t0;
+}
+
+// ------------------------------------------------------------- RENDER
+const cv = document.getElementById('game'), ctx = cv.getContext('2d');
+let view = { s: 1, ox: 0, oy: 0 };
+function resize() {
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  cv.width = innerWidth * dpr; cv.height = innerHeight * dpr; cv.style.width = innerWidth + 'px'; cv.style.height = innerHeight + 'px';
+  view.s = Math.min(innerWidth / WORLD.w, innerHeight / WORLD.h) * dpr;
+  view.ox = (cv.width - WORLD.w * view.s) / 2; view.oy = (cv.height - WORLD.h * view.s) / 2;
+}
+addEventListener('resize', resize); resize();
+const stars = []; { const r = mulberry32(7); for (let i = 0; i < 220; i++) stars.push({ x: r() * WORLD.w, y: r() * WORLD.h, b: r() }); }
+let debug = false, showPerf = false;
+
+// Per-team silhouettes (ship-local space, +x = forward, r = radius). Each returns after tracing a closed path.
+const SHAPES = [
+  // P1 delta dart
+  (c, r) => { c.moveTo(r * 1.3, 0); c.lineTo(-r * 0.8, r * 0.9); c.lineTo(-r * 0.4, 0); c.lineTo(-r * 0.8, -r * 0.9); c.closePath(); },
+  // P2 swept X-wing
+  (c, r) => { c.moveTo(r * 1.1, 0); c.lineTo(r * 0.1, r * 0.35); c.lineTo(-r * 0.2, r * 1.1); c.lineTo(-r * 0.7, r * 1.0); c.lineTo(-r * 0.6, r * 0.3); c.lineTo(-r * 0.9, 0);
+              c.lineTo(-r * 0.6, -r * 0.3); c.lineTo(-r * 0.7, -r * 1.0); c.lineTo(-r * 0.2, -r * 1.1); c.lineTo(r * 0.1, -r * 0.35); c.closePath(); },
+  // P3 twin-prong catamaran
+  (c, r) => { c.moveTo(r * 1.2, r * 0.45); c.lineTo(r * 0.2, r * 0.75); c.lineTo(-r * 0.9, r * 0.7); c.lineTo(-r * 0.6, r * 0.2); c.lineTo(-r * 0.6, -r * 0.2); c.lineTo(-r * 0.9, -r * 0.7);
+              c.lineTo(r * 0.2, -r * 0.75); c.lineTo(r * 1.2, -r * 0.45); c.lineTo(r * 0.5, -r * 0.2); c.lineTo(r * 0.5, r * 0.2); c.closePath(); },
+  // (index 4) drone: small diamond — defined after P4
+  // P4 saucer with rear fins
+  (c, r) => { c.moveTo(r * 1.0, 0); c.quadraticCurveTo(r * 0.6, r * 0.9, -r * 0.3, r * 0.8); c.lineTo(-r * 1.0, r * 1.0); c.lineTo(-r * 0.7, r * 0.3); c.lineTo(-r * 0.7, -r * 0.3); c.lineTo(-r * 1.0, -r * 1.0);
+              c.lineTo(-r * 0.3, -r * 0.8); c.quadraticCurveTo(r * 0.6, -r * 0.9, r * 1.0, 0); c.closePath(); },
+  // drone diamond
+  (c, r) => { c.moveTo(r * 1.1, 0); c.lineTo(0, r * 0.8); c.lineTo(-r * 0.9, 0); c.lineTo(0, -r * 0.8); c.closePath(); },
+];
+// Vector icons for powerups, drawn centered at origin, ~size px half-extent
+function drawIcon(type, c, z) {
+  ctx.strokeStyle = c; ctx.fillStyle = c; ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.beginPath();
+  switch (type) {
+    case 'S': for (let i = 0; i < 6; i++) { const an = i / 6 * TAU - Math.PI / 6; i ? ctx.lineTo(Math.cos(an) * z, Math.sin(an) * z) : ctx.moveTo(Math.cos(an) * z, Math.sin(an) * z); } ctx.closePath(); ctx.stroke(); ctx.beginPath(); ctx.arc(0, 0, z * 0.35, 0, TAU); ctx.fill(); break;
+    case 'H': // wrench: handle + open jaw
+      ctx.lineWidth = 3; ctx.moveTo(-z * 0.9, z * 0.9); ctx.lineTo(z * 0.2, -z * 0.2); ctx.stroke(); ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(z * 0.45, -z * 0.45, z * 0.55, Math.PI * 0.15, Math.PI * 1.35); ctx.stroke(); break;
+    case 'V': ctx.moveTo(z * 0.3, -z); ctx.lineTo(-z * 0.5, z * 0.1); ctx.lineTo(z * 0.1, z * 0.1); ctx.lineTo(-z * 0.3, z); ctx.lineTo(z * 0.5, -z * 0.1); ctx.lineTo(-z * 0.1, -z * 0.1); ctx.closePath(); ctx.fill(); break; // bolt
+    case 'G': ctx.moveTo(-z, z * 0.6); ctx.lineTo(z * 0.1, z * 0.6); ctx.lineTo(z * 0.1, z * 0.1); ctx.lineTo(z, z * 0.1); ctx.lineTo(z, -z * 0.4); ctx.lineTo(-z * 0.3, -z * 0.4); ctx.lineTo(-z * 0.3, 0); ctx.lineTo(-z, 0); ctx.closePath(); ctx.stroke(); break; // gun silhouette
+    case 'R': ctx.moveTo(z, 0); ctx.lineTo(z * 0.1, z * 0.45); ctx.lineTo(-z * 0.5, z * 0.45); ctx.lineTo(-z * 0.9, z * 0.9); ctx.lineTo(-z * 0.7, 0); ctx.lineTo(-z * 0.9, -z * 0.9); ctx.lineTo(-z * 0.5, -z * 0.45); ctx.lineTo(z * 0.1, -z * 0.45); ctx.closePath(); ctx.fill(); break; // rocket
+    case 'M': for (let i = 0; i < 8; i++) { const an = i / 8 * TAU, rr_ = i % 2 ? z : z * 0.55; i ? ctx.lineTo(Math.cos(an) * rr_, Math.sin(an) * rr_) : ctx.moveTo(Math.cos(an) * rr_, Math.sin(an) * rr_); } ctx.closePath(); ctx.stroke(); break; // spiky mine
+    case 'K': ctx.moveTo(z, 0); ctx.lineTo(0, z * 0.6); ctx.lineTo(-z * 0.7, 0); ctx.lineTo(0, -z * 0.6); ctx.closePath(); ctx.fill(); ctx.beginPath(); ctx.arc(-z * 0.2, 0, z * 1.1, Math.PI * 0.7, Math.PI * 1.3); ctx.stroke(); break; // seeker + arc
+    case 'P': ctx.moveTo(-z, 0); ctx.lineTo(z * 0.4, 0); ctx.stroke(); ctx.beginPath(); ctx.moveTo(z * 0.2, -z * 0.5); ctx.lineTo(z, 0); ctx.lineTo(z * 0.2, z * 0.5); ctx.closePath(); ctx.fill(); ctx.beginPath(); ctx.moveTo(-z, -z * 0.5); ctx.lineTo(-z * 0.4, -z * 0.5); ctx.moveTo(-z, z * 0.5); ctx.lineTo(-z * 0.4, z * 0.5); ctx.stroke(); break; // arrow + speed lines
+    case 'C': for (let i = -1; i <= 1; i++) ctx.rect(i * z * 0.6 - z * 0.2, -z * 0.7, z * 0.4, z * 1.4); ctx.fill(); break; // three rounds
+    case 'L': ctx.arc(0, 0, z * 0.8, -Math.PI * 0.2, Math.PI * 1.4); ctx.stroke(); ctx.beginPath(); ctx.moveTo(z * 0.9, -z * 0.9); ctx.lineTo(z * 0.9, -z * 0.1); ctx.lineTo(z * 0.1, -z * 0.3); ctx.closePath(); ctx.fill(); break; // reload arrow
+    case 'D': ctx.moveTo(0, -z); ctx.lineTo(z * 0.3, -z * 0.3); ctx.lineTo(z, -z * 0.2); ctx.lineTo(z * 0.45, z * 0.3); ctx.lineTo(z * 0.6, z); ctx.lineTo(0, z * 0.6); ctx.lineTo(-z * 0.6, z); ctx.lineTo(-z * 0.45, z * 0.3); ctx.lineTo(-z, -z * 0.2); ctx.lineTo(-z * 0.3, -z * 0.3); ctx.closePath(); ctx.fill(); break; // burst
+    case 'B': ctx.lineWidth = 4; ctx.moveTo(-z, 0); ctx.lineTo(z, 0); ctx.stroke(); ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(-z * 0.6, -z * 0.6); ctx.lineTo(z * 0.6, -z * 0.6); ctx.moveTo(-z * 0.6, z * 0.6); ctx.lineTo(z * 0.6, z * 0.6); ctx.stroke(); break; // beam
+  }
+}
+function killLeader() { let best = null; for (const s of S.ships) if (!s.drone && s.kills > 0 && (!best || s.kills > best.kills)) best = s; return best && S.ships.some(o => o !== best && !o.drone && o.kills === best.kills) ? null : best; }
+function drawShip(s) {
+  const c = TEAMS[s.team], r = s.r, it = s.intent, ml = Math.hypot(it.mx, it.my);
+  // movement chevron (world space, in the direction of thrust intent)
+  if (T.moveChevron && ml > 0.05) {
+    const a = Math.atan2(it.my, it.mx), d = r + 13;
+    ctx.save(); ctx.translate(s.x + Math.cos(a) * d, s.y + Math.sin(a) * d); ctx.rotate(a);
+    ctx.globalAlpha = 0.25 + 0.5 * Math.min(1, ml); ctx.strokeStyle = c.accent; ctx.lineWidth = 2; ctx.lineJoin = 'round';
+    ctx.beginPath(); ctx.moveTo(-4, -5); ctx.lineTo(1, 0); ctx.lineTo(-4, 5); ctx.stroke();
+    ctx.restore(); ctx.globalAlpha = 1;
+  }
+  ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(s.a);
+  const hit = s.hitFlash > 0;
+  ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.strokeStyle = hit ? '#fff' : c.color; ctx.fillStyle = hit ? '#fff' : c.dim;
+  ctx.beginPath(); SHAPES[c.shape % SHAPES.length](ctx, r); ctx.fill(); ctx.stroke();
+  // accent: canopy + spine stripe
+  ctx.fillStyle = hit ? '#fff' : c.accent;
+  ctx.beginPath(); ctx.ellipse(r * 0.35, 0, r * 0.28, r * 0.16, 0, 0, TAU); ctx.fill();
+  ctx.globalAlpha = 0.6; ctx.fillRect(-r * 0.55, -1, r * 0.6, 2); ctx.globalAlpha = 1;
+  ctx.restore();
+  // shield ring (hex), boost trail tint
+  if (s.shield > 0) {
+    ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(S.t * 1.5); ctx.strokeStyle = POWERUPS.S.color; ctx.globalAlpha = 0.35 + 0.2 * s.shield / T.shieldHits; ctx.lineWidth = 2; ctx.beginPath();
+    for (let i = 0; i < 6; i++) { const an = i / 6 * TAU, rr_ = r + 9; i ? ctx.lineTo(Math.cos(an) * rr_, Math.sin(an) * rr_) : ctx.moveTo(Math.cos(an) * rr_, Math.sin(an) * rr_); }
+    ctx.closePath(); ctx.stroke(); ctx.restore(); ctx.globalAlpha = 1;
+  }
+  if (s.boost > 0) { ctx.strokeStyle = POWERUPS.V.color; ctx.globalAlpha = 0.5; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(s.x, s.y, r + 4, 0, TAU); ctx.stroke(); ctx.globalAlpha = 1; }
+  if (s.weapon === 'beam' && s.ammo > 0 && s.reload <= 0) { // aim assist line until the first rock / wall
+    const ca = Math.cos(s.a), sa = Math.sin(s.a); let L = 2000;
+    for (const a of S.asteroids) { const ax = a.x - s.x, ay = a.y - s.y, t = ax * ca + ay * sa; if (t < 0) continue; const ex = ax - ca * t, ey = ay - sa * t; const e2 = ex * ex + ey * ey; if (e2 < a.r * a.r) L = Math.min(L, t - Math.sqrt(a.r * a.r - e2)); }
+    if (!T.wrap) { if (ca > 0) L = Math.min(L, (WORLD.w - s.x) / ca); else if (ca < 0) L = Math.min(L, -s.x / ca); if (sa > 0) L = Math.min(L, (WORLD.h - s.y) / sa); else if (sa < 0) L = Math.min(L, -s.y / sa); }
+    ctx.strokeStyle = s.ctrl ? '#fff' : c.color; ctx.globalAlpha = s.ctrl ? 0.45 : 0.18; ctx.lineWidth = 1; ctx.setLineDash([6, 8]); ctx.beginPath(); ctx.moveTo(s.x + ca * r, s.y + sa * r); ctx.lineTo(s.x + ca * L, s.y + sa * L); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+  }
+  if (s.charge > 0) { // beam charge: growing white glow at the muzzle + lock ring
+    const k = 1 - s.charge / T.beamCharge; ctx.fillStyle = '#fff'; ctx.globalAlpha = 0.3 + 0.6 * k; ctx.beginPath(); ctx.arc(s.x + Math.cos(s.a) * r * 1.3, s.y + Math.sin(s.a) * r * 1.3, 2 + 7 * k, 0, TAU); ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.globalAlpha = 0.5; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(s.x, s.y, r + 10, -Math.PI / 2, -Math.PI / 2 + TAU * k); ctx.stroke(); ctx.globalAlpha = 1;
+  }
+  if (!s.drone) { // ready indicator at the ship's center: two arcs fill from the top while reloading; solid dot = shot ready; hollow = between shots
+    const rr_ = 3.5, col = s.ctrl ? '#fff' : c.accent; ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.beginPath(); ctx.arc(s.x, s.y, rr_ + 1.5, 0, TAU); ctx.fill();
+    if (s.reload > 0) { const k = 1 - s.reload / s.reloadMax; ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(s.x, s.y, rr_, -Math.PI / 2, -Math.PI / 2 + Math.PI * k); ctx.moveTo(s.x, s.y - rr_); ctx.arc(s.x, s.y, rr_, -Math.PI / 2, -Math.PI / 2 - Math.PI * k, true); ctx.stroke(); }
+    else if (s.ammo > 0 && s.cd <= 0 && s.charge <= 0) { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(s.x, s.y, rr_, 0, TAU); ctx.fill(); }
+    else { ctx.strokeStyle = col; ctx.globalAlpha = 0.5; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(s.x, s.y, rr_, 0, TAU); ctx.stroke(); ctx.globalAlpha = 1; }
+  }
+  if (s.ctrl && s.intent.turret && s.intent.aim && (s.intent.ax || s.intent.ay)) { // touch aim line (twin/fling): dim dashed while reloading, solid when ready
+    const an = Math.atan2(s.intent.ay, s.intent.ax), ca = Math.cos(an), sa = Math.sin(an), ready = s.reload <= 0 && s.ammo > 0 && s.cd <= 0;
+    ctx.strokeStyle = s.assistTgt ? '#ff6a6a' : '#fff'; ctx.globalAlpha = ready ? 0.7 : 0.25; ctx.lineWidth = ready ? 2 : 1; if (!ready) ctx.setLineDash([4, 8]);
+    ctx.beginPath(); ctx.moveTo(s.x + ca * r, s.y + sa * r); ctx.lineTo(s.x + ca * T.aimLineLen, s.y + sa * T.aimLineLen); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+    if (s.assistTgt) { const t = s.assistTgt; ctx.strokeStyle = '#ff6a6a'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(t.x, t.y, t.r + 6, 0, TAU); ctx.stroke(); }
+  }
+  // hp pips (drones: none)
+  if (!s.drone) {
+    const w = 34; ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fillRect(s.x - w / 2, s.y + r + 6, w, 3); ctx.fillStyle = c.color; ctx.fillRect(s.x - w / 2, s.y + r + 6, w * Math.max(0, s.hp) / T.shipHp, 3);
+    const wd = wdef(s), pc = s.weapon === 'laser' ? c.accent : POWERUPS[Object.keys(POWERUPS).find(k => POWERUPS[k].weapon === s.weapon)].color;
+    const pw = Math.min(5, (w - (wd.clip - 1)) / wd.clip); ctx.fillStyle = pc; ctx.globalAlpha = 0.9;
+    for (let i = 0; i < s.ammo && i < wd.clip; i++) ctx.fillRect(s.x - w / 2 + i * (pw + 1), s.y + r + 11, pw, 2);
+    ctx.globalAlpha = 1;
+    if (s.rank > 0) { // gun rank pips (gold chevrons) under the ammo row; flash on rank-up
+      const fl = s.rankFlash > 0 ? 1 + s.rankFlash : 1; ctx.fillStyle = s.rankFlash > 0 ? '#fff' : '#ffd700';
+      for (let i = 0; i < s.rank; i++) { const px = s.x + (i - (s.rank - 1) / 2) * 7 * fl, py = s.y + r + 18; ctx.beginPath(); ctx.moveTo(px, py - 2.5 * fl); ctx.lineTo(px + 3 * fl, py + 2.5 * fl); ctx.lineTo(px - 3 * fl, py + 2.5 * fl); ctx.closePath(); ctx.fill(); }
+    }
+  }
+  if (s.ctrl) { // possessed callout: "YOU" tag with pointer (no ring — rings read as shields)
+    const ty = s.y - r - 26 + Math.sin(S.t * 4) * 2;
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(s.x, ty + 9); ctx.lineTo(s.x - 5, ty + 2); ctx.lineTo(s.x + 5, ty + 2); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.92)'; ctx.fillRect(s.x - 16, ty - 12, 32, 14); ctx.fillStyle = '#000'; ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('YOU', s.x, ty - 5);
+  }
+  if (s === S.leader) { // crown
+    const cy = s.y - r - (s.ctrl ? 40 : 16); ctx.fillStyle = '#ffd700'; ctx.strokeStyle = '#8a6d00'; ctx.lineWidth = 1; ctx.beginPath();
+    ctx.moveTo(s.x - 8, cy + 5); ctx.lineTo(s.x - 8, cy - 4); ctx.lineTo(s.x - 4, cy); ctx.lineTo(s.x, cy - 6); ctx.lineTo(s.x + 4, cy); ctx.lineTo(s.x + 8, cy - 4); ctx.lineTo(s.x + 8, cy + 5); ctx.closePath(); ctx.fill(); ctx.stroke();
+  }
+  if (debug) {
+    ctx.strokeStyle = 'rgba(255,255,255,.3)'; ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, TAU); ctx.stroke();
+    if (!s.ctrl && s.ai.target && s.ai.target.alive) {
+      const [dx, dy] = delta(s.x, s.y, s.ai.target.x, s.ai.target.y);
+      ctx.strokeStyle = { RETREAT: '#f55', STRAFE: '#5f5', HUNT: '#ff5', BREAK: '#f5f', PICKUP: '#5ff' }[s.ai.state] || '#aaa'; ctx.setLineDash([4, 6]);
+      ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(s.x + dx, s.y + dy); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = ctx.strokeStyle; ctx.font = '11px monospace'; ctx.fillText(s.ai.state, s.x + r + 4, s.y - r);
+    }
+  }
+}
+function render() {
+  const t0 = performance.now();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#07080c'; ctx.fillRect(0, 0, cv.width, cv.height);
+  const shx = (rand() - 0.5) * S.shake, shy = (rand() - 0.5) * S.shake;
+  // camera: zoom about focus point (elimination) so that point stays put on screen
+  const z = S.zoom, f = S.focus || { x: WORLD.w / 2, y: WORLD.h / 2 }, sz = view.s * z;
+  ctx.setTransform(sz, 0, 0, sz, view.ox + f.x * view.s * (1 - z) + shx * sz, view.oy + f.y * view.s * (1 - z) + shy * sz);
+  // arena
+  ctx.fillStyle = '#0b0d14'; ctx.fillRect(0, 0, WORLD.w, WORLD.h);
+  for (const st of stars) { ctx.fillStyle = `rgba(200,210,255,${0.15 + st.b * 0.5})`; ctx.fillRect(st.x, st.y, 1.5, 1.5); }
+  ctx.strokeStyle = '#1b2030'; ctx.lineWidth = 2; ctx.strokeRect(0, 0, WORLD.w, WORLD.h);
+  // asteroids
+  ctx.lineWidth = 2;
+  for (const a of S.asteroids) {
+    if (a.spike) { // spikeball: dark core, 8 spikes; strobes while igniting
+      const lit = a.fuse != null, strobe = lit && Math.sin(S.t * 60) > 0;
+      ctx.save(); ctx.translate(a.x, a.y); ctx.rotate(a.a);
+      ctx.strokeStyle = strobe ? '#fff' : lit ? '#ff3030' : '#c0c8d8'; ctx.fillStyle = strobe ? '#fff' : lit ? '#5a1010' : '#1a1e2a'; ctx.lineWidth = 2; ctx.beginPath();
+      for (let i = 0; i < 16; i++) { const an = i / 16 * TAU, rr_ = i % 2 ? a.r : a.r * 0.6; i ? ctx.lineTo(Math.cos(an) * rr_, Math.sin(an) * rr_) : ctx.moveTo(Math.cos(an) * rr_, Math.sin(an) * rr_); }
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = lit ? '#ff6060' : '#ff3030'; ctx.beginPath(); ctx.arc(0, 0, 3, 0, TAU); ctx.fill();
+      ctx.restore(); continue;
+    }
+    if (a.barrel) { // explosive barrel: orange drum with hazard stripe
+      ctx.save(); ctx.translate(a.x, a.y); ctx.rotate(a.a); const f = a.flash > 0;
+      ctx.fillStyle = f ? '#fff' : '#b5541c'; ctx.strokeStyle = f ? '#fff' : '#ffb060'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.roundRect(-11, -15, 22, 30, 4); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = f ? '#ddd' : '#2a1a0a'; ctx.fillRect(-11, -4, 22, 8); ctx.fillStyle = '#ffd36b'; ctx.beginPath(); ctx.arc(0, 0, 2.5, 0, TAU); ctx.fill();
+      for (let i = 0; i < a.hp; i++) { ctx.fillStyle = '#ffb060'; ctx.fillRect(-9 + i * 7, 10, 5, 2); }
+      ctx.restore(); continue;
+    }
+    if (a.volatile) { const pulse = 0.5 + 0.5 * Math.sin(S.t * 5 + a.r); ctx.strokeStyle = `rgba(255,${110 + pulse * 60 | 0},60,1)`; ctx.fillStyle = `rgba(${60 + pulse * 40 | 0},22,18,1)`; }
+    else { ctx.strokeStyle = '#8a92a8'; ctx.fillStyle = '#1a1e2a'; }
+    ctx.save(); ctx.translate(a.x, a.y); ctx.rotate(a.a); ctx.beginPath();
+    for (let i = 0; i < a.pts.length; i++) { const an = i / a.pts.length * TAU, rr_ = a.r * a.pts[i]; i ? ctx.lineTo(Math.cos(an) * rr_, Math.sin(an) * rr_) : ctx.moveTo(Math.cos(an) * rr_, Math.sin(an) * rr_); }
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    if (a.volatile) { ctx.fillStyle = 'rgba(255,170,80,0.9)'; ctx.beginPath(); ctx.arc(0, 0, a.r * 0.22, 0, TAU); ctx.fill(); }
+    const cracks = a.maxHp - a.hp;
+    if (cracks > 0) {
+      ctx.strokeStyle = 'rgba(200,210,230,0.55)'; ctx.lineWidth = 1.2; ctx.beginPath();
+      for (let k = 0; k < cracks; k++) {
+        const an = a.seed + k * 2.39996, r0 = a.r * (0.15 + ((a.seed * (k + 1)) % 1) * 0.25), r1 = a.r * 0.95, mid = an + 0.35 * (k % 2 ? 1 : -1);
+        ctx.moveTo(Math.cos(an) * r0, Math.sin(an) * r0); ctx.lineTo(Math.cos(mid) * (r0 + r1) / 2, Math.sin(mid) * (r0 + r1) / 2); ctx.lineTo(Math.cos(an) * r1, Math.sin(an) * r1);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+  // powerups: hex with letter
+  for (const u of S.pups) {
+    const c = POWERUPS[u.type].color, bob = Math.sin(S.t * 3 + u.born) * 2, fade = Math.min(1, u.life / 2);
+    ctx.save(); ctx.translate(u.x, u.y + bob); ctx.globalAlpha = fade; ctx.rotate(S.t * 0.8);
+    ctx.strokeStyle = c; ctx.fillStyle = 'rgba(10,14,22,0.9)'; ctx.lineWidth = 2; ctx.beginPath();
+    for (let i = 0; i < 6; i++) { const an = i / 6 * TAU; i ? ctx.lineTo(Math.cos(an) * u.r, Math.sin(an) * u.r) : ctx.moveTo(Math.cos(an) * u.r, Math.sin(an) * u.r); }
+    ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.rotate(-S.t * 0.8);
+    drawIcon(u.type, c, 7);
+    ctx.restore(); ctx.globalAlpha = 1;
+  }
+  // blast rings (expanding AoE circle)
+  for (const g of S.rings) { const k = 1 - g.life / g.max; ctx.strokeStyle = g.color; ctx.lineWidth = 3 + 6 * (1 - k); ctx.globalAlpha = 0.9 * (1 - k); ctx.beginPath(); ctx.arc(g.x, g.y, g.R * (0.3 + 0.7 * Math.sqrt(k)), 0, TAU); ctx.stroke();
+    ctx.fillStyle = g.color; ctx.globalAlpha = 0.25 * (1 - k); ctx.fill(); }
+  ctx.globalAlpha = 1;
+  // mine proximity indicators
+  for (const l of S.lasers) if (l.type === 'mine' && l.arm <= 0 && !l.chase) { ctx.strokeStyle = TEAMS[l.team].color; ctx.globalAlpha = 0.12 + 0.08 * Math.sin(S.t * 6); ctx.lineWidth = 1; ctx.setLineDash([4, 6]); ctx.beginPath(); ctx.arc(l.x, l.y, T.mineTrigger, 0, TAU); ctx.stroke(); ctx.setLineDash([]); }
+  ctx.globalAlpha = 1;
+  // lasers
+  ctx.lineCap = 'round';
+  // lasers/pellets: saber look — wide soft team-colored glow layers under a hot white core, batched per team per layer
+  const layers = T.laserGlow ? [[11, 0.14], [6, 0.35], [3, 0.9]] : [[3, 0.9]];
+  for (let tm = 0; tm < TEAMS.length; tm++) {
+    for (const [w, al] of layers) {
+      ctx.strokeStyle = TEAMS[tm].color; ctx.lineWidth = w; ctx.globalAlpha = al; ctx.beginPath();
+      for (const l of S.lasers) { if (l.team !== tm || (l.type !== 'laser' && l.type !== 'pellet')) continue; const sp = Math.hypot(l.vx, l.vy) || 1, len = l.type === 'pellet' ? 7 : 16; ctx.moveTo(l.x - l.vx / sp * len, l.y - l.vy / sp * len); ctx.lineTo(l.x, l.y); }
+      ctx.stroke();
+    }
+  }
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.4; ctx.globalAlpha = 0.95; ctx.beginPath();
+  for (const l of S.lasers) { if (l.type !== 'laser' && l.type !== 'pellet') continue; const sp = Math.hypot(l.vx, l.vy) || 1, len = l.type === 'pellet' ? 5 : 12; ctx.moveTo(l.x - l.vx / sp * len, l.y - l.vy / sp * len); ctx.lineTo(l.x, l.y); }
+  ctx.stroke(); ctx.globalAlpha = 1;
+  // heavy projectiles
+  for (const l of S.lasers) {
+    if (l.type === 'laser' || l.type === 'pellet') continue;
+    const c = TEAMS[l.team].color, ang = Math.atan2(l.vy, l.vx);
+    ctx.save(); ctx.translate(l.x, l.y);
+    if (l.type === 'beam') {
+      ctx.rotate(ang); const len = 140;
+      ctx.lineCap = 'round'; ctx.strokeStyle = c; ctx.lineWidth = 34; ctx.globalAlpha = 0.14; ctx.beginPath(); ctx.moveTo(-len, 0); ctx.lineTo(0, 0); ctx.stroke();
+      ctx.lineWidth = 16; ctx.globalAlpha = 0.4; ctx.stroke(); ctx.lineWidth = 7; ctx.globalAlpha = 0.8; ctx.stroke(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.globalAlpha = 1; ctx.stroke();
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(0, 0, 6, 0, TAU); ctx.fill();
+    } else if (l.type === 'rocket') {
+      ctx.rotate(ang); ctx.fillStyle = 'rgba(255,170,80,0.9)'; ctx.beginPath(); ctx.moveTo(-6, -3); ctx.lineTo(-13 - rand() * 6, 0); ctx.lineTo(-6, 3); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = c; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(8, 0); ctx.lineTo(-5, 4); ctx.lineTo(-5, -4); ctx.closePath(); ctx.fill(); ctx.stroke();
+    } else if (l.type === 'homing') {
+      ctx.rotate(ang); ctx.fillStyle = c; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(7, 0); ctx.lineTo(0, 4); ctx.lineTo(-5, 0); ctx.lineTo(0, -4); ctx.closePath(); ctx.fill(); ctx.stroke();
+    } else if (l.type === 'mine') {
+      const armed = l.arm <= 0, blink = armed && Math.sin(S.t * 10) > 0;
+      ctx.rotate(S.t * 2); ctx.strokeStyle = c; ctx.fillStyle = '#1a1e2a'; ctx.lineWidth = 2; ctx.beginPath();
+      for (let i = 0; i < 8; i++) { const an = i / 8 * TAU, rr_ = i % 2 ? 7 : 4; i ? ctx.lineTo(Math.cos(an) * rr_, Math.sin(an) * rr_) : ctx.moveTo(Math.cos(an) * rr_, Math.sin(an) * rr_); }
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = blink ? '#ff4040' : armed ? '#602020' : '#888'; ctx.beginPath(); ctx.arc(0, 0, 2.2, 0, TAU); ctx.fill();
+      if (debug && armed) { ctx.strokeStyle = 'rgba(255,80,80,.3)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(0, 0, T.mineTrigger, 0, TAU); ctx.stroke(); }
+    }
+    ctx.restore(); ctx.globalAlpha = 1;
+  }
+  // particles
+  for (const p of S.parts) { ctx.globalAlpha = p.life / p.maxLife; ctx.fillStyle = p.color; ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3); }
+  ctx.globalAlpha = 1;
+  S.leader = killLeader();
+  for (const s of S.ships) if (s.alive) drawShip(s);
+  // screen flash (beam)
+  if (S.flash > 0) { ctx.fillStyle = '#fff'; ctx.globalAlpha = S.flash * 0.8; ctx.fillRect(0, 0, WORLD.w, WORLD.h); ctx.globalAlpha = 1; }
+  // virtual sticks (screen space)
+  ctx.setTransform(1, 0, 0, 1, 0, 0); const dpr = cv.width / innerWidth;
+  for (const side of ['L', 'R']) {
+    const st = touch[side]; if (!st) continue; const R = touch.radius * dpr;
+    if (side === 'R' && inputMode === 'button') { ctx.fillStyle = 'rgba(255,120,120,0.45)'; ctx.beginPath(); ctx.arc(st.x0 * dpr, st.y0 * dpr, R * 0.6, 0, TAU); ctx.fill(); continue; }
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(st.x0 * dpr, st.y0 * dpr, R, 0, TAU); ctx.stroke();
+    const hs = S.ships.find(q => q.ctrl); ctx.fillStyle = side === 'R' && hs && hs.assistTgt ? 'rgba(255,120,120,0.8)' : 'rgba(255,255,255,0.5)'; ctx.beginPath(); ctx.arc((st.x0 + st.dx * touch.radius) * dpr, (st.y0 + st.dy * touch.radius) * dpr, R * 0.4, 0, TAU); ctx.fill();
+  }
+  perf.render += performance.now() - t0;
+}
+
+// ------------------------------------------------------------- HUD / UI
+const hud = document.getElementById('hud'), banner = document.getElementById('banner');
+function showBanner(txt, color) { banner.textContent = txt; banner.style.color = color; banner.classList.add('show'); }
+function hideBanner() { banner.classList.remove('show'); }
+let hudTimer = 0;
+function updateHud(dt) {
+  hudTimer -= dt; if (hudTimer > 0) return; hudTimer = 0.2;
+  const alive = new Array(T.teams).fill(0); for (const s of S.ships) if (s.alive && !s.drone) alive[s.team]++;
+  const kills = new Array(T.teams).fill(0); for (const s of S.ships) if (!s.drone) kills[s.team] += s.kills;
+  let h = `<span class="dim">${VERSION}</span> &nbsp;` + alive.map((n, i) => `<span style="color:${TEAMS[i].color}">${TEAMS[i].name} ${n}<span class="dim">·${kills[i]}k</span></span>`).join(' <span class="dim">·</span> ') + ` &nbsp;<span class="dim">${S.t.toFixed(0)}s</span>`;
+  const ld = S.leader; if (ld) h += ` &nbsp;<span style="color:#ffd700">♛ ${TEAMS[ld.team].name} ${ld.kills}</span>`;
+  if (showPerf || tuneOpen) h += `<br><span class="dim">${perf.fps.toFixed(0)} fps · frame ${perf.frameAvg.toFixed(2)}ms · sim ${perf.simAvg.toFixed(2)} (ai ${perf.aiAvg.toFixed(2)}, col ${perf.colAvg.toFixed(2)}) · render ${perf.renderAvg.toFixed(2)} · ${S.lasers.length} lasers ${S.parts.length} parts</span>`;
+  const human = S.ships.find(s => s.ctrl);
+  h += `<br><span class="dim">${human ? 'you: ' + TEAMS[human.team].name + (human.alive ? ` · hp ${human.hp}${human.shield ? ' · shield ' + human.shield : ''}${human.boost > 0 ? ' · BOOST' : ''} · ${wdef(human).name} ${human.reload > 0 ? 'RELOADING' : human.charge > 0 ? 'CHARGING' : human.ammo + '/' + wdef(human).clip}${isFinite(human.reserve) ? ' (+' + human.reserve + ')' : ''}${' · gun ★' + human.rank} · spd ${human.stat.speed.toFixed(2)} proj ${human.stat.pspeed.toFixed(2)} clip+${human.stat.clip} rel ${human.stat.reload.toFixed(2)} dmg+${human.stat.dmg}` : ' · eliminated') : (IS_TOUCH ? 'spectating · Possess to play' : 'spectating · press 1 to possess')}${IS_TOUCH ? '' : '  ·  T tuning'}</span>`;
+  hud.innerHTML = h;
+}
+
+// tuning panel
+const tune = document.getElementById('tune'), rows = document.getElementById('tuneRows'), presetSel = document.getElementById('presetSel');
+let tuneOpen = false;
+function buildPanel() {
+  rows.innerHTML = ''; let group = null;
+  for (const m of META) {
+    if (m.group !== group) { group = m.group; const h = document.createElement('h3'); h.textContent = group; rows.appendChild(h); }
+    const row = document.createElement('div'); row.className = 'row';
+    row.innerHTML = `<label title="${m.key}">${m.key}</label><input type="range" min="${m.min}" max="${m.max}" step="${m.step}"><input type="number" min="${m.min}" max="${m.max}" step="${m.step}">`;
+    const [rng, num] = row.querySelectorAll('input');
+    rng.value = num.value = T[m.key];
+    const set = v => { T[m.key] = +v; rng.value = num.value = +v; saveTuning(); };
+    rng.oninput = () => set(rng.value); num.onchange = () => set(num.value);
+    m.el = { rng, num }; rows.appendChild(row);
+  }
+  refreshPresets();
+}
+function refreshPanel() { for (const m of META) if (m.el) m.el.rng.value = m.el.num.value = T[m.key]; }
+function refreshPresets() { presetSel.innerHTML = Object.keys(PRESETS).map(k => `<option>${k}</option>`).join(''); }
+presetSel.onchange = () => { resetTuning(); applyTuning(PRESETS[presetSel.value]); refreshPanel(); saveTuning(); };
+document.getElementById('btnSave').onclick = () => { const n = prompt('Preset name'); if (!n) return; const d = tuningJSON(); const diff = {}; for (const m of META) if (d[m.key] !== m.def) diff[m.key] = d[m.key]; PRESETS[n] = diff; refreshPresets(); presetSel.value = n; saveTuning(); };
+document.getElementById('btnReset').onclick = () => { resetTuning(); refreshPanel(); saveTuning(); presetSel.value = 'default'; };
+document.getElementById('btnCopy').onclick = () => { const s = JSON.stringify(tuningJSON(), null, 1); navigator.clipboard?.writeText(s); console.log(s); };
+document.getElementById('btnRestart').onclick = () => startMatch();
+function toggleTune(force) { tuneOpen = force ?? !tuneOpen; tune.classList.toggle('open', tuneOpen); }
+
+// perf strip
+const perfBox = document.getElementById('perf');
+perfBox.innerHTML = '<div id="perfTxt"></div><canvas id="perfCv" width="300" height="44"></canvas>';
+const perfTxt = document.getElementById('perfTxt'), perfCv = document.getElementById('perfCv'), pctx = perfCv.getContext('2d');
+function drawPerf() {
+  if (!tuneOpen) return;
+  perfTxt.textContent = `${perf.fps.toFixed(0)} fps  frame ${perf.frameAvg.toFixed(2)}ms  sim ${perf.simAvg.toFixed(2)}  ai ${perf.aiAvg.toFixed(2)}  col ${perf.colAvg.toFixed(2)}  render ${perf.renderAvg.toFixed(2)}`;
+  pctx.clearRect(0, 0, 300, 44);
+  pctx.strokeStyle = '#2a3447'; pctx.beginPath(); pctx.moveTo(0, 44 - 16.67 * 2); pctx.lineTo(300, 44 - 16.67 * 2); pctx.stroke(); // 16.7ms line
+  for (let i = 0; i < perf.hist.length; i++) {
+    const v = perf.hist[(perf.hi + i) % perf.hist.length]; const h = Math.min(44, v * 2);
+    pctx.fillStyle = v > 16.7 ? '#ff6b5a' : v > 8 ? '#ffc85a' : '#5ab0ff'; pctx.fillRect(i * 2.5, 44 - h, 2, h);
+  }
+}
+
+// ------------------------------------------------------------- INPUT
+addEventListener('keydown', e => {
+  audioInit();
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  keys[e.code] = true;
+  if (e.code === 'KeyT') toggleTune();
+  if (e.code === 'Escape') toggleTune(false);
+  if (e.code === 'KeyH') debug = !debug;
+  if (e.code === 'KeyP') showPerf = !showPerf;
+  if (e.code === 'Enter') startMatch();
+  if (e.code === 'Digit1') togglePossess(kbm, 0);
+  if (e.code === 'Digit2') togglePossess(pad, 1);
+  if (e.code === 'Space') e.preventDefault();
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+function toScreen(e) { const dpr = cv.width / innerWidth; mouse.x = (e.clientX * dpr - view.ox) / view.s; mouse.y = (e.clientY * dpr - view.oy) / view.s; }
+cv.addEventListener('mousemove', toScreen);
+cv.addEventListener('mousedown', e => { audioInit(); if (e.button === 0) { mouse.down = true; toScreen(e); } });
+addEventListener('mouseup', e => { if (e.button === 0) { if (mouse.down) kbm.released = true; mouse.down = false; } });
+cv.addEventListener('contextmenu', e => e.preventDefault());
+addEventListener('gamepadconnected', e => { pad.index = e.gamepad.index; if (pad.wantsShip == null) togglePossess(pad, 1); });
+cv.addEventListener('pointerdown', e => {
+  if (e.pointerType === 'mouse') return; audioInit();
+  const side = e.clientX < innerWidth / 2 ? 'L' : 'R';
+  touch[side] = { id: e.pointerId, x0: e.clientX, y0: e.clientY, dx: 0, dy: 0 }; cv.setPointerCapture?.(e.pointerId);
+});
+function stickMove(e) {
+  for (const side of ['L', 'R']) { const st = touch[side]; if (!st || st.id !== e.pointerId) continue;
+    let dx = (e.clientX - st.x0) / touch.radius, dy = (e.clientY - st.y0) / touch.radius; const m = Math.hypot(dx, dy); if (m > 1) { dx /= m; dy /= m; }
+    st.dx = dx; st.dy = dy; }
+}
+cv.addEventListener('pointermove', e => { if (e.pointerType !== 'mouse') stickMove(e); });
+for (const ev of ['pointerup', 'pointercancel']) cv.addEventListener(ev, e => { for (const side of ['L', 'R']) if (touch[side] && touch[side].id === e.pointerId) { if (side === 'R' && inputMode === 'fling' && Math.hypot(touch.R.dx, touch.R.dy) > 0.12) touch.flung = { dx: touch.R.dx, dy: touch.R.dy }; touch[side] = null; } });
+const humanCtrl = () => IS_TOUCH ? touch : kbm;
+document.getElementById('bPossess').onclick = () => { audioInit(); if (!S.ships.find(s => s.ctrl === humanCtrl())) togglePossess(humanCtrl(), 0); };
+document.getElementById('bSpectate').onclick = () => { for (const c of controllers) { const cur = S.ships.find(s => s.ctrl === c); if (cur) cur.ctrl = null; c.wantsShip = null; } };
+document.getElementById('bRestart').onclick = () => { audioInit(); startMatch(); };
+document.getElementById('bTune').onclick = () => toggleTune();
+document.getElementById('bInput').onclick = () => setInputMode(INPUT_MODES[(INPUT_MODES.indexOf(inputMode) + 1) % INPUT_MODES.length]);
+setInputMode(inputMode);
+function togglePossess(ctrl, team) {
+  const cur = S.ships.find(s => s.ctrl === ctrl);
+  if (cur) { cur.ctrl = null; ctrl.wantsShip = null; return; }
+  const s = S.ships.find(s => s.team === team && s.alive && !s.ctrl) || S.ships.find(s => s.team === team && !s.ctrl);
+  if (s) { s.ctrl = ctrl; ctrl.wantsShip = team; }
+}
+
+// ------------------------------------------------------------- MAIN LOOP (fixed timestep)
+let last = performance.now(), acc = 0;
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { last = performance.now(); acc = 0; } });
+perf.frameAvg = perf.simAvg = perf.aiAvg = perf.colAvg = perf.renderAvg = 0;
+function frame(now) {
+  const ft = Math.min(0.1, (now - last) / 1000); last = now;
+  // juice clock: hitstop freezes sim; dilation slows it; both in real seconds
+  let scale = 1;
+  if (S.hitstop > 0) { S.hitstop -= ft; scale = 0; }
+  else if (S.dilate > 0) { S.dilate -= ft; const k = Math.min(1, S.dilate / (T.dilateSec * 0.35)); scale = T.dilateScale + (1 - T.dilateScale) * (1 - k); }
+  acc += ft * scale;
+  const zt = S.dilate > 0 ? T.elimZoom : 1; S.zoom += (zt - S.zoom) * Math.min(1, T.zoomEase * ft);
+  if (S.dilate <= 0 && Math.abs(S.zoom - 1) < 0.005) { S.zoom = 1; S.focus = null; }
+  const f0 = performance.now();
+  perf.sim = perf.ai = perf.col = perf.render = 0;
+  let steps = 0;
+  while (acc >= DT && steps < 8) { step(DT); acc -= DT; steps++; }
+  if (steps === 8) acc = 0;
+  if (scale === 0) S.shake *= Math.exp(-8 * ft);
+  S.flash = Math.max(0, (S.flash || 0) - ft);
+  render();
+  const fms = performance.now() - f0;
+  perfPush(fms);
+  // moving averages
+  const k = 0.1;
+  perf.frameAvg += (fms - perf.frameAvg) * k; perf.simAvg += (perf.sim - perf.simAvg) * k; perf.aiAvg += (perf.ai - perf.aiAvg) * k;
+  perf.colAvg += (perf.col - perf.colAvg) * k; perf.renderAvg += (perf.render - perf.renderAvg) * k;
+  perf._acc += ft; perf._n++; if (perf._acc >= 0.5) { perf.fps = perf._n / perf._acc; perf._acc = 0; perf._n = 0; }
+  updateHud(ft); drawPerf();
+  requestAnimationFrame(frame);
+}
+
+// ------------------------------------------------------------- HEADLESS / VALIDATION API
+// window.__game.simulateMatch(seed, maxSeconds, tuningOverrides?) -> {winner, duration, seed, timedOut, kills:[..]}
+window.__game = {
+  T, META, S, PRESETS, startMatch, step, applyTuning, resetTuning, tuningJSON,
+  simulateMatch(seed, maxSeconds = 300, overrides) {
+    const saved = tuningJSON();
+    if (overrides) applyTuning(overrides);
+    const human = controllers.map(c => c.wantsShip); controllers.forEach(c => c.wantsShip = null); // AI only
+    S.headless = true; startMatch(seed);
+    const maxSteps = Math.ceil(maxSeconds / DT); let n = 0;
+    while (!S.match.over && n++ < maxSteps) step(DT);
+    const res = { seed, winner: S.match.winner, duration: S.match.over ? S.match.duration : S.t, timedOut: !S.match.over,
+      alive: [...Array(T.teams).keys()].map(t => S.ships.filter(s => s.team === t && s.alive && !s.drone).length) };
+    S.headless = false; applyTuning(saved); controllers.forEach((c, i) => c.wantsShip = human[i]);
+    return res;
+  }
+};
+
+// ------------------------------------------------------------- BOOT
+const params = new URLSearchParams(location.search);
+loadTuning(); buildPanel();
+if (params.has('headless')) { S.headless = true; startMatch(1); }
+else { if (!IS_TOUCH) kbm.wantsShip = 0; startMatch(); requestAnimationFrame(frame); }
+</script>
+</body>
+</html>
